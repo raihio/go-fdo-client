@@ -18,14 +18,18 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/fido-device-onboard/go-fdo"
 	"github.com/fido-device-onboard/go-fdo/cbor"
 	"github.com/fido-device-onboard/go-fdo/kex"
+	"github.com/fido-device-onboard/go-fdo/protocol"
 )
 
 // Transport implements FDO message sending capabilities over HTTP. Send may be
 // used for sending one message and receiving one response message.
 type Transport struct {
+	// The http/https URL, potentially including a path prefix, but without
+	// /fdo/101/msg.
+	BaseURL string
+
 	// Client to use for HTTP requests. Nil indicates that the default client
 	// should be used.
 	Client *http.Client
@@ -46,12 +50,10 @@ type Transport struct {
 	MaxContentLength int64
 }
 
-var _ fdo.Transport = (*Transport)(nil)
-
 // Send sends a single message and receives a single response message.
 //
 //nolint:gocyclo
-func (t *Transport) Send(ctx context.Context, base string, msgType uint8, msg any, sess kex.Session) (respType uint8, _ io.ReadCloser, _ error) {
+func (t *Transport) Send(ctx context.Context, msgType uint8, msg any, sess kex.Session) (respType uint8, _ io.ReadCloser, _ error) {
 	// Initialize default values
 	if t.Client == nil {
 		t.Client = http.DefaultClient
@@ -74,7 +76,7 @@ func (t *Transport) Send(ctx context.Context, base string, msgType uint8, msg an
 	}
 
 	// Create request with URL and body
-	uri, err := url.JoinPath(base, "fdo/101/msg", strconv.Itoa(int(msgType)))
+	uri, err := url.JoinPath(t.BaseURL, "fdo/101/msg", strconv.Itoa(int(msgType)))
 	if err != nil {
 		return 0, nil, fmt.Errorf("error parsing base URL: %w", err)
 	}
@@ -89,14 +91,14 @@ func (t *Transport) Send(ctx context.Context, base string, msgType uint8, msg an
 
 	// Add request headers
 	req.Header.Add("Content-Type", "application/cbor")
-	prot := fdo.ProtocolOf(msgType)
-	if errMsg, ok := msg.(fdo.ErrorMessage); ok {
+	prot := protocol.Of(msgType)
+	if errMsg, ok := msg.(protocol.ErrorMessage); ok {
 		// Error messages use the authorization token for the protocol where
 		// failure occurred
-		prot = fdo.ProtocolOf(errMsg.PrevMsgType)
+		prot = protocol.Of(errMsg.PrevMsgType)
 	}
-	if prot == fdo.UnknownProtocol || prot == fdo.AnyProtocol {
-		return 0, nil, fmt.Errorf("invalid message type: unknown protocol or error message not using fdo.ErrorMessage type")
+	if prot == protocol.UnknownProtocol || prot == protocol.AnyProtocol {
+		return 0, nil, fmt.Errorf("invalid message type: unknown protocol or error message not using protocol.ErrorMessage type")
 	}
 	if token := t.Auth.GetToken(ctx, prot); token != "" {
 		req.Header.Add("Authorization", token)
@@ -134,7 +136,7 @@ func (t *Transport) handleResponse(resp *http.Response, sess kex.Session) (msgTy
 			_ = resp.Body.Close()
 			return 0, nil, fmt.Errorf("request contains invalid message type in path: %w", err)
 		}
-		t.Auth.StoreToken(resp.Request.Context(), fdo.ProtocolOf(uint8(reqType)), token)
+		t.Auth.StoreToken(resp.Request.Context(), protocol.Of(uint8(reqType)), token)
 	}
 
 	// Parse message type from headers (or implicit from response code)
@@ -180,7 +182,7 @@ func (t *Transport) handleResponse(resp *http.Response, sess kex.Session) (msgTy
 	}
 
 	// Decrypt if a key exchange session is provided for types other than error
-	if sess != nil && msgType != fdo.ErrorMsgType {
+	if sess != nil && msgType != protocol.ErrorMsgType {
 		defer func() { _ = resp.Body.Close() }()
 
 		decrypted, err := sess.Decrypt(rand.Reader, content)

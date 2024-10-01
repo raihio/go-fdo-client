@@ -13,29 +13,30 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
-	"fmt"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"math/big"
 	"time"
 
 	"github.com/fido-device-onboard/go-fdo"
-	"github.com/fido-device-onboard/go-fdo/cbor"
 	"github.com/fido-device-onboard/go-fdo/cose"
+	"github.com/fido-device-onboard/go-fdo/protocol"
 )
 
 // State implements interfaces for state which must be persisted between
 // protocol sessions, but not between server processes.
 type State struct {
-	RVBlobs    map[fdo.GUID]*cose.Sign1[fdo.To1d, []byte]
-	Vouchers   map[fdo.GUID]*fdo.Voucher
-	OwnerKeys  map[fdo.KeyType]crypto.Signer
-	AutoExtend interface {
-		ExtendVoucher(*fdo.Voucher, crypto.PublicKey) (*fdo.Voucher, error)
+	RVBlobs   map[protocol.GUID]*cose.Sign1[protocol.To1d, []byte]
+	Vouchers  map[protocol.GUID]*fdo.Voucher
+	OwnerKeys map[protocol.KeyType]struct {
+		Key   crypto.Signer
+		Chain []*x509.Certificate
 	}
-	AutoRegisterRV           *fdo.To1d
-	PreserveReplacedVouchers bool
 }
 
 var _ fdo.RendezvousBlobPersistentState = (*State)(nil)
-var _ fdo.VoucherPersistentState = (*State)(nil)
+var _ fdo.ManufacturerVoucherPersistentState = (*State)(nil)
+var _ fdo.OwnerVoucherPersistentState = (*State)(nil)
 var _ fdo.OwnerKeyPersistentState = (*State)(nil)
 
 // NewState initializes the in-memory state.
@@ -44,7 +45,15 @@ func NewState() (*State, error) {
 	if err != nil {
 		return nil, err
 	}
+	rsaCert, err := newCA(rsaKey)
+	if err != nil {
+		return nil, err
+	}
 	ec256Key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	ec256Cert, err := newCA(ec256Key)
 	if err != nil {
 		return nil, err
 	}
@@ -52,84 +61,61 @@ func NewState() (*State, error) {
 	if err != nil {
 		return nil, err
 	}
+	ec384Cert, err := newCA(ec384Key)
+	if err != nil {
+		return nil, err
+	}
 	return &State{
-		RVBlobs:  make(map[fdo.GUID]*cose.Sign1[fdo.To1d, []byte]),
-		Vouchers: make(map[fdo.GUID]*fdo.Voucher),
-		OwnerKeys: map[fdo.KeyType]crypto.Signer{
-			fdo.Rsa2048RestrKeyType: rsaKey,
-			fdo.RsaPkcsKeyType:      rsaKey,
-			fdo.RsaPssKeyType:       rsaKey,
-			fdo.Secp256r1KeyType:    ec256Key,
-			fdo.Secp384r1KeyType:    ec384Key,
+		RVBlobs:  make(map[protocol.GUID]*cose.Sign1[protocol.To1d, []byte]),
+		Vouchers: make(map[protocol.GUID]*fdo.Voucher),
+		OwnerKeys: map[protocol.KeyType]struct {
+			Key   crypto.Signer
+			Chain []*x509.Certificate
+		}{
+			protocol.Rsa2048RestrKeyType: {Key: rsaKey, Chain: []*x509.Certificate{rsaCert}},
+			protocol.RsaPkcsKeyType:      {Key: rsaKey, Chain: []*x509.Certificate{rsaCert}},
+			protocol.RsaPssKeyType:       {Key: rsaKey, Chain: []*x509.Certificate{rsaCert}},
+			protocol.Secp256r1KeyType:    {Key: ec256Key, Chain: []*x509.Certificate{ec256Cert}},
+			protocol.Secp384r1KeyType:    {Key: ec384Key, Chain: []*x509.Certificate{ec384Cert}},
 		},
 	}, nil
 }
 
-// NewVoucher creates and stores a new voucher.
+// NewVoucher creates and stores a voucher for a newly initialized device.
+// Note that the voucher may have entries if the server was configured for
+// auto voucher extension.
 func (s *State) NewVoucher(_ context.Context, ov *fdo.Voucher) error {
-	if s.AutoExtend != nil {
-		keyType := ov.Header.Val.ManufacturerKey.Type
-		key, ok := s.OwnerKeys[keyType]
-		if !ok {
-			return fmt.Errorf("auto extend: no owner key of type %s", keyType)
-		}
-		ex, err := s.AutoExtend.ExtendVoucher(ov, key.Public())
-		if err != nil {
-			return err
-		}
-		ov = ex
+	s.Vouchers[ov.Header.Val.GUID] = ov
+	return nil
+}
 
-		if s.AutoRegisterRV != nil {
-			keyType := ov.Header.Val.ManufacturerKey.Type
-			key, ok := s.OwnerKeys[keyType]
-			if !ok {
-				return fmt.Errorf("auto register RV blob: no owner key of type %s", keyType)
-			}
-			var opts crypto.SignerOpts
-			switch keyType {
-			case fdo.Rsa2048RestrKeyType, fdo.RsaPkcsKeyType, fdo.RsaPssKeyType:
-				switch rsaPub := key.Public().(*rsa.PublicKey); rsaPub.Size() {
-				case 2048 / 8:
-					opts = crypto.SHA256
-				case 3072 / 8:
-					opts = crypto.SHA384
-				default:
-					return fmt.Errorf("unsupported RSA key size: %d bits", rsaPub.Size()*8)
-				}
-
-				if keyType == fdo.RsaPssKeyType {
-					opts = &rsa.PSSOptions{
-						SaltLength: rsa.PSSSaltLengthEqualsHash,
-						Hash:       opts.(crypto.Hash),
-					}
-				}
-			}
-
-			sign1 := cose.Sign1[fdo.To1d, []byte]{
-				Payload: cbor.NewByteWrap(*s.AutoRegisterRV),
-			}
-			if err := sign1.Sign(key, nil, nil, opts); err != nil {
-				return fmt.Errorf("auto register RV blob: %w", err)
-			}
-			s.RVBlobs[ov.Header.Val.GUID] = &sign1
-		}
-	}
+// AddVoucher stores the voucher of a device owned by the service.
+func (s *State) AddVoucher(_ context.Context, ov *fdo.Voucher) error {
 	s.Vouchers[ov.Header.Val.GUID] = ov
 	return nil
 }
 
 // ReplaceVoucher stores a new voucher, possibly deleting or marking the
 // previous voucher as replaced.
-func (s *State) ReplaceVoucher(_ context.Context, oldGUID fdo.GUID, ov *fdo.Voucher) error {
-	if !s.PreserveReplacedVouchers {
-		delete(s.Vouchers, oldGUID)
-	}
+func (s *State) ReplaceVoucher(_ context.Context, oldGUID protocol.GUID, ov *fdo.Voucher) error {
+	delete(s.Vouchers, oldGUID)
 	s.Vouchers[ov.Header.Val.GUID] = ov
 	return nil
 }
 
+// RemoveVoucher untracks a voucher, possibly by deleting it or marking it
+// as removed, and returns it for extension.
+func (s *State) RemoveVoucher(ctx context.Context, guid protocol.GUID) (*fdo.Voucher, error) {
+	ov, ok := s.Vouchers[guid]
+	if !ok {
+		return nil, fdo.ErrNotFound
+	}
+	delete(s.Vouchers, guid)
+	return ov, nil
+}
+
 // Voucher retrieves a voucher by GUID.
-func (s *State) Voucher(_ context.Context, guid fdo.GUID) (*fdo.Voucher, error) {
+func (s *State) Voucher(_ context.Context, guid protocol.GUID) (*fdo.Voucher, error) {
 	ov, ok := s.Vouchers[guid]
 	if !ok {
 		return nil, fdo.ErrNotFound
@@ -137,24 +123,63 @@ func (s *State) Voucher(_ context.Context, guid fdo.GUID) (*fdo.Voucher, error) 
 	return ov, nil
 }
 
-// Signer returns the private key matching a given key type.
-func (s *State) Signer(keyType fdo.KeyType) (crypto.Signer, bool) {
+// OwnerKey returns the private key matching a given key type and optionally
+// its certificate chain.
+func (s *State) OwnerKey(keyType protocol.KeyType) (crypto.Signer, []*x509.Certificate, error) {
 	key, ok := s.OwnerKeys[keyType]
-	return key, ok
+	if !ok {
+		return nil, nil, fdo.ErrNotFound
+	}
+	return key.Key, key.Chain, nil
+}
+
+func newCA(priv crypto.Signer) (*x509.Certificate, error) {
+	serialNumberLimit := new(big.Int).Lsh(big.NewInt(1), 128)
+	serialNumber, err := rand.Int(rand.Reader, serialNumberLimit)
+	if err != nil {
+		return nil, err
+	}
+	template := &x509.Certificate{
+		SerialNumber: serialNumber,
+		Issuer:       pkix.Name{CommonName: "CA"},
+		Subject:      pkix.Name{CommonName: "CA"},
+		NotBefore:    time.Now(),
+		NotAfter:     time.Now().Add(30 * 360 * 24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, priv.Public(), priv)
+	if err != nil {
+		return nil, err
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		return nil, err
+	}
+	return cert, nil
+}
+
+// ManufacturerKey returns the signer of a given key type.
+func (s *State) ManufacturerKey(keyType protocol.KeyType) (crypto.Signer, []*x509.Certificate, error) {
+	return s.OwnerKey(keyType)
 }
 
 // SetRVBlob sets the owner rendezvous blob for a device.
-func (s *State) SetRVBlob(ctx context.Context, guid fdo.GUID, to1d *cose.Sign1[fdo.To1d, []byte], exp time.Time) error {
+func (s *State) SetRVBlob(ctx context.Context, ov *fdo.Voucher, to1d *cose.Sign1[protocol.To1d, []byte], exp time.Time) error {
 	// TODO: Handle expiration
-	s.RVBlobs[guid] = to1d
+	s.RVBlobs[ov.Header.Val.GUID] = to1d
+	s.Vouchers[ov.Header.Val.GUID] = ov
 	return nil
 }
 
 // RVBlob returns the owner rendezvous blob for a device.
-func (s *State) RVBlob(ctx context.Context, guid fdo.GUID) (*cose.Sign1[fdo.To1d, []byte], error) {
+func (s *State) RVBlob(ctx context.Context, guid protocol.GUID) (*cose.Sign1[protocol.To1d, []byte], *fdo.Voucher, error) {
 	to1d, ok := s.RVBlobs[guid]
 	if !ok {
-		return nil, fdo.ErrNotFound
+		return nil, nil, fdo.ErrNotFound
 	}
-	return to1d, nil
+	ov, ok := s.Vouchers[guid]
+	if !ok {
+		return nil, nil, fdo.ErrNotFound
+	}
+	return to1d, ov, nil
 }

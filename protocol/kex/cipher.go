@@ -5,7 +5,9 @@ package kex
 
 import (
 	"crypto"
+	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/fido-device-onboard/go-fdo/cose"
 )
@@ -31,6 +33,56 @@ const (
 	CoseAes256CtrCipher CipherSuiteID = -17760706
 )
 
+// CipherSuiteByName parses a name and returns its identifier.
+func CipherSuiteByName(name string) (CipherSuiteID, bool) {
+	switch strings.ToUpper(name) {
+	case "A128GCM":
+		return A128GcmCipher, true
+	case "A192GCM":
+		return A192GcmCipher, true
+	case "A256GCM":
+		return A256GcmCipher, true
+	case "AES-CCM-64-128-128":
+		return AesCcm64_128_128Cipher, true
+	case "AES-CCM-64-128-256":
+		return AesCcm64_128_256Cipher, true
+	case "COSEAES128CBC":
+		return CoseAes128CbcCipher, true
+	case "COSEAES128CTR":
+		return CoseAes128CtrCipher, true
+	case "COSEAES256CBC":
+		return CoseAes256CbcCipher, true
+	case "COSEAES256CTR":
+		return CoseAes256CtrCipher, true
+	}
+	return 0, false
+}
+
+func (id CipherSuiteID) String() string {
+	switch id {
+	case A128GcmCipher:
+		return "A128GCM"
+	case A192GcmCipher:
+		return "A192GCM"
+	case A256GcmCipher:
+		return "A256GCM"
+	case AesCcm64_128_128Cipher:
+		return "AES-CCM-64-128-128"
+	case AesCcm64_128_256Cipher:
+		return "AES-CCM-64-128-256"
+	case CoseAes128CbcCipher:
+		return "COSEAES128CBC"
+	case CoseAes128CtrCipher:
+		return "COSEAES128CTR"
+	case CoseAes256CbcCipher:
+		return "COSEAES256CBC"
+	case CoseAes256CtrCipher:
+		return "COSEAES256CTR"
+	default:
+		return "Unknown Key Exchange Suite"
+	}
+}
+
 // Suite returns the cipher suite registered to the given ID.
 func (id CipherSuiteID) Suite() CipherSuite {
 	s, ok := ciphers[id]
@@ -49,6 +101,13 @@ type CipherSuite struct {
 	// Hash used for generating encryption and verification keys during key
 	// exchange
 	PRFHash crypto.Hash
+}
+
+func (c CipherSuite) String() string {
+	return fmt.Sprintf(`CipherSuite[
+  EncryptAlg   %d
+  MacAlg       %d
+]`, c.EncryptAlg, c.MacAlg)
 }
 
 var ciphers = make(map[CipherSuiteID]CipherSuite)
@@ -180,22 +239,22 @@ func init() {
 		PRFHash:    crypto.SHA256,
 	})
 	RegisterCipherSuite(CoseAes128CtrCipher, CipherSuite{
-		EncryptAlg: -1, // FIXME: Implement
+		EncryptAlg: cose.A128CTR,
 		MacAlg:     cose.HMac256,
 		PRFHash:    crypto.SHA256,
 	})
 	RegisterCipherSuite(CoseAes128CbcCipher, CipherSuite{
-		EncryptAlg: -1, // FIXME: Implement
+		EncryptAlg: cose.A128CBC,
 		MacAlg:     cose.HMac256,
 		PRFHash:    crypto.SHA256,
 	})
 	RegisterCipherSuite(CoseAes256CtrCipher, CipherSuite{
-		EncryptAlg: -1, // FIXME: Implement
+		EncryptAlg: cose.A256CTR,
 		MacAlg:     cose.HMac384,
 		PRFHash:    crypto.SHA384,
 	})
 	RegisterCipherSuite(CoseAes256CbcCipher, CipherSuite{
-		EncryptAlg: -1, // FIXME: Implement
+		EncryptAlg: cose.A256CBC,
 		MacAlg:     cose.HMac384,
 		PRFHash:    crypto.SHA384,
 	})

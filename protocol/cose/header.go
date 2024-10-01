@@ -6,7 +6,6 @@ package cose
 import (
 	"fmt"
 	"io"
-	"strconv"
 
 	"github.com/fido-device-onboard/go-fdo/cbor"
 )
@@ -143,45 +142,7 @@ var (
 )
 
 // Label is used for [HeaderMap]s and can be either an int64 or a string.
-type Label struct {
-	Int64 int64
-	Str   string
-}
-
-func (l Label) String() string {
-	if l.Int64 != 0 {
-		return strconv.FormatInt(l.Int64, 10)
-	}
-	return l.Str
-}
-
-// MarshalCBOR implements cbor.Marshaler.
-func (l Label) MarshalCBOR() ([]byte, error) {
-	// 0 is a reserved label
-	if l.Int64 != 0 {
-		return cbor.Marshal(l.Int64)
-	}
-	return cbor.Marshal(l.String)
-}
-
-// UnmarshalCBOR implements cbor.Unmarshaler.
-func (l *Label) UnmarshalCBOR(b []byte) error {
-	var v any
-	if err := cbor.Unmarshal(b, &v); err != nil {
-		return err
-	}
-	switch v := v.(type) {
-	case int64:
-		l.Int64 = v
-		l.Str = ""
-	case string:
-		l.Int64 = 0
-		l.Str = v
-	default:
-		return fmt.Errorf("unexpected label type: %T", v)
-	}
-	return nil
-}
+type Label = IntOrStr
 
 // rawHeaderMap contains protected or unprotected key-value pairs.
 type rawHeaderMap map[Label]cbor.RawBytes
@@ -201,36 +162,15 @@ func newRawHeaderMap(unmarshaled map[Label]any) (rawHeaderMap, error) {
 
 // emptyOrSerializedMap encodes to/from a CBOR byte string which either
 // contains a serialized non-empty map or is empty itself.
-type emptyOrSerializedMap = cbor.Bstr[omitEmpty[rawHeaderMap]]
+type emptyOrSerializedMap = cbor.Bstr[cbor.OmitEmpty[rawHeaderMap]]
 
 // newEmptyOrSerializedMap marshals the values of a header map and wraps
 // it in a SerializedOrEmptyHeaders type.
 func newEmptyOrSerializedMap(unmarshaled map[Label]any) (emptyOrSerializedMap, error) {
 	hmap, err := newRawHeaderMap(unmarshaled)
 	return emptyOrSerializedMap{
-		Val: omitEmpty[rawHeaderMap]{
+		Val: cbor.OmitEmpty[rawHeaderMap]{
 			Val: hmap,
 		},
 	}, err
 }
-
-// omitEmpty encodes a zero value (zero, empty array, empty map) as zero bytes.
-type omitEmpty[T any] struct{ Val T }
-
-func (o omitEmpty[T]) MarshalCBOR() ([]byte, error) {
-	b, err := cbor.Marshal(o.Val)
-	if err != nil {
-		return nil, err
-	}
-	if len(b) != 1 {
-		return b, nil
-	}
-	switch b[0] {
-	case 0x00, 0x40, 0x60, 0x80, 0xa0:
-		return []byte{}, nil
-	default:
-		return b, nil
-	}
-}
-
-func (o *omitEmpty[T]) UnmarshalCBOR(b []byte) error { return cbor.Unmarshal(b, &o.Val) }

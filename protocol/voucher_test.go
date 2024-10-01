@@ -19,6 +19,7 @@ import (
 	"github.com/fido-device-onboard/go-fdo/blob"
 	"github.com/fido-device-onboard/go-fdo/cbor"
 	"github.com/fido-device-onboard/go-fdo/cose"
+	"github.com/fido-device-onboard/go-fdo/protocol"
 )
 
 /*
@@ -78,7 +79,7 @@ func TestVoucherHeaderDeterministic(t *testing.T) {
 	var ov struct {
 		Version   uint16
 		Header    cbor.Bstr[cbor.RawBytes]
-		Hmac      fdo.Hmac
+		Hmac      protocol.Hmac
 		CertChain *[]*cbor.X509Certificate
 		Entries   []cose.Sign1Tag[fdo.VoucherEntryPayload, []byte]
 	}
@@ -123,7 +124,7 @@ func readCredential(t *testing.T) *blob.DeviceCredential {
 		Active:           rustCred.Active,
 		DeviceCredential: rustCred.DeviceCredential,
 		HmacSecret:       rustCred.Secrets["Plain"]["hmac_secret"],
-		PrivateKey:       blob.Pkcs8Key{PrivateKey: privateKey},
+		PrivateKey:       blob.Pkcs8Key{Signer: privateKey},
 	}
 }
 
@@ -135,7 +136,7 @@ func TestVerifyUnextendedVoucher(t *testing.T) {
 
 	cred := readCredential(t)
 
-	if err := ov.VerifyHeader(cred); err != nil {
+	if err := ov.VerifyHeader(cred.HMACs()); err != nil {
 		t.Errorf("error verifying voucher header: %v", err)
 	}
 

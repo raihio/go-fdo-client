@@ -36,37 +36,22 @@ import (
 // requests results in a small device receive queue and large device send
 // queue. Many file downloads result in the opposite.
 
-func handleOwnerModuleMessages(ctx context.Context, modules deviceModuleMap, ownerInfo *serviceinfo.UnchunkReader, deviceInfoChan chan<- *serviceinfo.ChunkReader) {
-	defer close(deviceInfoChan)
-
-	// 1000 service info buffered in and out means up to ~1MB of data for
-	// the default MTU. If both queues fill, the device will deadlock. This
-	// should only happen for a poorly behaved owner module.
-	deviceInfo, send := serviceinfo.NewChunkOutPipe(1000)
-	select {
-	case <-ctx.Done():
-		return
-	case deviceInfoChan <- deviceInfo:
-	}
-
-	var prevModuleName string
-	var prevMod serviceinfo.DeviceModule
+func handleOwnerModuleMessages(ctx context.Context, prevModuleName string, modules deviceModuleMap, ownerInfo *serviceinfo.UnchunkReader, send *serviceinfo.UnchunkWriter) string {
 	for {
 		// Get next service info from the owner service and handle it.
 		key, messageBody, ok := ownerInfo.NextServiceInfo()
 		if !ok {
-			var err error
-			if prevModuleName != "" {
-				err = handleOwnerModuleYield(ctx, prevMod, prevModuleName, send)
+			if mod, active := modules.Lookup(prevModuleName); active {
+				if err := handleOwnerModuleYield(ctx, mod, prevModuleName, send); err != nil {
+					_ = send.CloseWithError(err)
+					return prevModuleName
+				}
 			}
-			if err != nil {
-				_ = send.CloseWithError(err)
-			} else {
-				_ = send.Close()
-			}
-			return
+			_ = send.Close()
+			return prevModuleName
 		}
 		moduleName, messageName, _ := strings.Cut(key, ":")
+		prevModuleName = moduleName
 
 		// Automatically receive and respond to active messages. This send is
 		// expected to be buffered until all receives are processed, unlike
@@ -79,18 +64,15 @@ func handleOwnerModuleMessages(ctx context.Context, modules deviceModuleMap, own
 			newActive, err := handleActive(active, mod, moduleName, messageBody, send)
 			if err != nil {
 				_ = send.CloseWithError(err)
-				return
+				return prevModuleName
 			}
 			modules.active[moduleName] = newActive
 			continue
 		}
 		if !active {
 			_ = send.CloseWithError(fmt.Errorf("device has not activated module %q", moduleName))
-			return
+			return prevModuleName
 		}
-
-		// TODO: Should prevModuleName == (moduleName || "") be asserted?
-		prevMod, prevModuleName = mod, moduleName
 
 		// Call device module and provide it a function which can be used to
 		// send zero or more service info KVs. The function returns a writer to
@@ -101,7 +83,7 @@ func handleOwnerModuleMessages(ctx context.Context, modules deviceModuleMap, own
 		// which is used in the ServiceInfo send loop.
 		if err := handleOwnerModuleMessage(ctx, mod, moduleName, messageName, messageBody, send); err != nil {
 			_ = send.CloseWithError(err)
-			return
+			return prevModuleName
 		}
 	}
 }
@@ -126,7 +108,7 @@ func handleActive(prevActive bool, mod serviceinfo.DeviceModule, moduleName stri
 	if !active || prevActive {
 		return active, nil
 	}
-	if _, isUnknown := mod.(serviceinfo.UnknownModule); isUnknown && moduleName != devmodModuleName {
+	if _, isUnknown := mod.(serviceinfo.UnknownModule); isUnknown && moduleName != "devmod" {
 		active = false
 	}
 	if err := send.NextServiceInfo(moduleName, "active"); err != nil {
@@ -160,7 +142,7 @@ func handleOwnerModuleMessage(ctx context.Context, mod serviceinfo.DeviceModule,
 	}
 
 	// Handle message
-	if err := mod.Receive(ctx, moduleName, messageName, messageBody, respond, yield); err != nil {
+	if err := mod.Receive(ctx, messageName, messageBody, respond, yield); err != nil {
 		return err
 	}
 

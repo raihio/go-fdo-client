@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: (C) 2024 Intel Corporation
 // SPDX-License-Identifier: Apache 2.0
 
-package fdo
+package protocol
 
 import (
 	"crypto"
@@ -10,8 +10,10 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/fido-device-onboard/go-fdo/cbor"
+	"github.com/fido-device-onboard/go-fdo/cose"
 )
 
 // KeyType is an FDO pkType enum.
@@ -51,6 +53,30 @@ func (typ KeyType) String() string {
 	}
 }
 
+// ParseKeyType parses names following the below convention:
+//
+//	RSA2048RESTR: 1, ;; RSA 2048 with restricted key/exponent (PKCS1 1.5 encoding)
+//	RSAPKCS:      5, ;; RSA key, PKCS1, v1.5
+//	RSAPSS:       6, ;; RSA key, PSS
+//	SECP256R1:    10, ;; ECDSA secp256r1 = NIST-P-256 = prime256v1
+//	SECP384R1:    11, ;; ECDSA secp384r1 = NIST-P-384
+func ParseKeyType(name string) (KeyType, error) {
+	switch strings.ToUpper(name) {
+	case "RSA2048RESTR":
+		return Rsa2048RestrKeyType, nil
+	case "RSAPKCS":
+		return RsaPkcsKeyType, nil
+	case "RSAPSS":
+		return RsaPssKeyType, nil
+	case "SECP256R1":
+		return Secp256r1KeyType, nil
+	case "SECP384R1":
+		return Secp384r1KeyType, nil
+	default:
+		return 0, fmt.Errorf("unknown key type: %s", name)
+	}
+}
+
 // Public key types
 const (
 	// RSA 2048 with restricted key/exponent (PKCS1 1.5 encoding)
@@ -64,11 +90,6 @@ const (
 	// ECDSA secp384r1 = NIST-P-384
 	Secp384r1KeyType KeyType = 11
 )
-
-// PublicKeyOrChain is a constraint for supported FDO PublicKey types.
-type PublicKeyOrChain interface {
-	*ecdsa.PublicKey | *rsa.PublicKey | []*x509.Certificate
-}
 
 // KeyEncoding is an FDO pkEnc enum.
 //
@@ -107,6 +128,11 @@ const (
 	CoseKeyEnc KeyEncoding = 3
 )
 
+// PublicKeyOrChain is a constraint for supported FDO PublicKey types.
+type PublicKeyOrChain interface {
+	*ecdsa.PublicKey | *rsa.PublicKey | []*x509.Certificate
+}
+
 // PublicKey encodes public key information in FDO messages and vouchers.
 type PublicKey struct {
 	Type     KeyType
@@ -125,8 +151,10 @@ func (pub PublicKey) String() string {
 	return s
 }
 
-func newPublicKey(typ KeyType, pub any) (*PublicKey, error) {
-	switch pub := pub.(type) {
+// NewPublicKey creates a public key structure encoded as X509, X5Chain, or a
+// COSE Key, depending on the type of pub and the value of asCOSE.
+func NewPublicKey[T PublicKeyOrChain](typ KeyType, pub T, asCOSE bool) (*PublicKey, error) {
+	switch pub := any(pub).(type) {
 	case []*x509.Certificate:
 		chain := make([]*cbor.X509Certificate, len(pub))
 		for i, cert := range pub {
@@ -143,6 +171,22 @@ func newPublicKey(typ KeyType, pub any) (*PublicKey, error) {
 		}, nil
 
 	case *ecdsa.PublicKey, *rsa.PublicKey:
+		if asCOSE {
+			coseKey, err := cose.NewKey(pub)
+			if err != nil {
+				return nil, fmt.Errorf("COSE encoding: %w", err)
+			}
+			body, err := cbor.Marshal(coseKey)
+			if err != nil {
+				return nil, fmt.Errorf("COSE encoding: %w", err)
+			}
+			return &PublicKey{
+				Type:     typ,
+				Encoding: CoseKeyEnc,
+				Body:     body,
+			}, nil
+		}
+
 		der, err := x509.MarshalPKIXPublicKey(pub)
 		if err != nil {
 			return nil, fmt.Errorf("X509 encoding: %w", err)
@@ -186,6 +230,9 @@ func (pub *PublicKey) parse() error {
 
 	case X5ChainKeyEnc:
 		return pub.parseX5Chain()
+
+	case CoseKeyEnc:
+		return pub.parseCose()
 
 	default:
 		return fmt.Errorf("unsupported key encoding: %s", pub.Encoding)
@@ -254,4 +301,17 @@ func (pub *PublicKey) parseX5Chain() error {
 	default:
 		return fmt.Errorf("unsupported key type: %s", pub.Type)
 	}
+}
+
+func (pub *PublicKey) parseCose() error {
+	var key cose.Key
+	if err := cbor.Unmarshal([]byte(pub.Body), &key); err != nil {
+		return err
+	}
+	pubkey, err := key.Public()
+	if err != nil {
+		return err
+	}
+	pub.key = pubkey
+	return nil
 }

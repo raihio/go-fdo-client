@@ -202,6 +202,7 @@ package cbor
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -390,16 +391,12 @@ func (d *Decoder) Decode(v any) error {
 		if u, ok := rv.Interface().(Unmarshaler); ok {
 			b, err := d.decodeRaw()
 			if err != nil {
-				return err
-			}
-
-			// Handle null/undefined
-			/*
-				if len(b) == 1 && (b[0] == 0xf6 || b[0] == 0xf7) {
-					rv.SetZero()
+				_, isOmitEmpty := rv.Interface().(interface{ isOmitEmpty() })
+				if errors.Is(err, io.EOF) && isOmitEmpty {
 					return nil
 				}
-			*/
+				return err
+			}
 
 			return u.UnmarshalCBOR(b)
 		}
@@ -723,7 +720,7 @@ func (d *Decoder) decodeByteSlice(rv reflect.Value, additional []byte) error {
 	// Support fixed-size array
 	if rv.Kind() == reflect.Array && rv.Type().Elem().Kind() == reflect.Uint8 {
 		// Ensure array is large enough
-		if uint64(rv.Len()) < length {
+		if rv.Len() < int(length) {
 			return fmt.Errorf("fixed-size array is too small: must be at least length %d", length)
 		}
 
@@ -1213,10 +1210,13 @@ func (e *Encoder) encodeNumber(rv reflect.Value) error {
 	switch {
 	case rv.CanUint(): // positive uint
 		u64, majorType = rv.Uint(), unsignedIntMajorType
-	case rv.CanInt() && rv.Int() >= 0: // positive int
-		u64, majorType = uint64(rv.Int()), unsignedIntMajorType
-	case rv.CanInt() && rv.Int() < 0: // negative int
-		u64, majorType = uint64(-rv.Int()-1), negativeIntMajorType
+	case rv.CanInt():
+		if v := rv.Int(); v >= 0 {
+			u64, majorType = uint64(v), unsignedIntMajorType
+		} else {
+			abs := uint64(-v)
+			u64, majorType = abs-1, negativeIntMajorType
+		}
 	default:
 		return ErrUnsupportedType{typeName: rv.Type().String()}
 	}
@@ -1262,6 +1262,10 @@ func (e *Encoder) encodeTextOrBinary(rv reflect.Value) error {
 }
 
 func (e *Encoder) encodeArray(size int, get func(int) reflect.Value) error {
+	if size < 0 {
+		panic("negative array lengths are invalid")
+	}
+
 	// Write the length as additional info
 	info := u64Bytes(uint64(size))
 	if err := e.write(additionalInfo(arrayMajorType, info)); err != nil {
@@ -1328,6 +1332,10 @@ func (e *Encoder) encodeStruct(size int, get func([]int) reflect.Value, field fu
 }
 
 func (e *Encoder) encodeMap(length int, keys []reflect.Value, get func(k reflect.Value) reflect.Value) error {
+	if length < 0 {
+		panic("negative map lengths are invalid")
+	}
+
 	// Write the length as additional info
 	info := u64Bytes(uint64(length))
 	if err := e.write(additionalInfo(mapMajorType, info)); err != nil {
@@ -1512,6 +1520,35 @@ func collectFieldWeights(parents []int, i, upper int, field func(int) reflect.St
 		omittable: omittable,
 	}))
 }
+
+// OmitEmpty encodes a zero value (zero, empty array, empty byte string, empty
+// string, empty map) as zero bytes.
+type OmitEmpty[T any] struct{ Val T }
+
+// MarshalCBOR encodes a zero value (zero, empty array, empty byte string,
+// empty string, empty map) as zero bytes.
+func (o OmitEmpty[T]) MarshalCBOR() ([]byte, error) {
+	b, err := Marshal(o.Val)
+	if err != nil {
+		return nil, err
+	}
+	if len(b) != 1 {
+		return b, nil
+	}
+	switch b[0] {
+	case 0x00, 0x40, 0x60, 0x80, 0xa0:
+		return []byte{}, nil
+	default:
+		return b, nil
+	}
+}
+
+// UnmarshalCBOR decodes data into its generic typed Val field. Note that
+// OmitEmpty is treated specially by the cbor package such that reading zero
+// bytes (EOF) will not cause an error.
+func (o *OmitEmpty[T]) UnmarshalCBOR(p []byte) error { return Unmarshal(p, &o.Val) }
+
+func (o OmitEmpty[T]) isOmitEmpty() {}
 
 // BytewiseLexicalSort is a map key sorting function. It is the default for an
 // `Encoder`.

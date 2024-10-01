@@ -16,8 +16,6 @@ import (
 // Implement owner service info module for
 // https://github.com/fido-alliance/fdo-sim/blob/main/fsim-repository/fdo.download.md
 
-const fdoDownloadModule = "fdo.download"
-
 // DownloadContents implements an owner module for fdo.download using a seekable
 // reader, such as an [*os.File].
 type DownloadContents[T io.ReadSeeker] struct {
@@ -37,16 +35,15 @@ type DownloadContents[T io.ReadSeeker] struct {
 var _ serviceinfo.OwnerModule = (*DownloadContents[io.ReadSeekCloser])(nil)
 
 // HandleInfo implements serviceinfo.OwnerModule.
-func (d *DownloadContents[T]) HandleInfo(ctx context.Context, moduleName, messageName string, messageBody io.Reader) error {
-	if moduleName != fdoDownloadModule {
-		return fmt.Errorf("invalid module name %q, expected %q", moduleName, fdoDownloadModule)
-	}
+func (d *DownloadContents[T]) HandleInfo(ctx context.Context, messageName string, messageBody io.Reader) error {
 	switch messageName {
 	case "active":
-		// TODO: Check that active is true
-		var ignore bool
-		if err := cbor.NewDecoder(messageBody).Decode(&ignore); err != nil {
-			return fmt.Errorf("error decoding message %s:%s: %w", moduleName, messageName, err)
+		var deviceActive bool
+		if err := cbor.NewDecoder(messageBody).Decode(&deviceActive); err != nil {
+			return fmt.Errorf("error decoding message %s: %w", messageName, err)
+		}
+		if !deviceActive {
+			return fmt.Errorf("device service info module is not active")
 		}
 		return nil
 
@@ -58,7 +55,7 @@ func (d *DownloadContents[T]) HandleInfo(ctx context.Context, moduleName, messag
 		}()
 		var errCode int64
 		if err := cbor.NewDecoder(messageBody).Decode(&errCode); err != nil {
-			return fmt.Errorf("error decoding message %s:%s: %w", moduleName, messageName, err)
+			return fmt.Errorf("error decoding message %s: %w", messageName, err)
 		}
 		if errCode == -1 && d.MustDownload {
 			return fmt.Errorf("device failed to download %q", d.Name)
@@ -82,10 +79,8 @@ func (d *DownloadContents[T]) ProduceInfo(ctx context.Context, producer *service
 		return false, true, nil
 	}
 
-	const moduleName = fdoDownloadModule
-
 	if d.started {
-		return d.sendData(moduleName, producer)
+		return d.sendData(producer)
 	}
 
 	// Hash contents and seek back to start
@@ -108,12 +103,12 @@ func (d *DownloadContents[T]) ProduceInfo(ctx context.Context, producer *service
 		}
 
 		// Check that there's enough space to send the message
-		if len(messageBody) > producer.Available(moduleName, messageName) {
+		if len(messageBody) > producer.Available(messageName) {
 			return false, false, fmt.Errorf("not enough buffer space to send non-data service info")
 		}
 
 		// Write the message
-		if err := producer.WriteChunk(moduleName, messageName, messageBody); err != nil {
+		if err := producer.WriteChunk(messageName, messageBody); err != nil {
 			return false, false, err
 		}
 	}
@@ -130,14 +125,14 @@ func (d *DownloadContents[T]) ProduceInfo(ctx context.Context, producer *service
 	return false, false, nil
 }
 
-func (d *DownloadContents[T]) sendData(moduleName string, producer *serviceinfo.Producer) (blockPeer, moduleDone bool, _ error) {
+func (d *DownloadContents[T]) sendData(producer *serviceinfo.Producer) (blockPeer, moduleDone bool, _ error) {
 	const messageName = "data"
 
 	// Seek to and read chunk
 	if _, err := d.Contents.Seek(d.index, io.SeekStart); err != nil {
 		return false, false, fmt.Errorf("error seeking to next chunk of %q contents: %w", d.Name, err)
 	}
-	available := producer.Available(moduleName, messageName) - 6 // 3 for each byte array (double-encoded)
+	available := producer.Available(messageName) - 6 // 3 for each byte array (double-encoded)
 	if available < 1 {
 		return false, false, fmt.Errorf("not enough buffer space to send data chunk service info")
 	}
@@ -156,10 +151,10 @@ func (d *DownloadContents[T]) sendData(moduleName string, producer *serviceinfo.
 	}
 
 	// Check that there's enough space to send the message
-	if len(messageBody) > producer.Available(moduleName, messageName) {
+	if len(messageBody) > producer.Available(messageName) {
 		return false, false, nil
 	}
 
 	// Write the message
-	return false, false, producer.WriteChunk(moduleName, messageName, messageBody)
+	return false, false, producer.WriteChunk(messageName, messageBody)
 }

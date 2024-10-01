@@ -1,61 +1,44 @@
 // SPDX-FileCopyrightText: (C) 2024 Intel Corporation
 // SPDX-License-Identifier: Apache 2.0
 
+//go:build !windows
+
 // Package tpm implements device credentials using the
 // [TPM Draft Spec](https://fidoalliance.org/specs/FDO/securing-fdo-in-tpm-v1.0-rd-20231010/securing-fdo-in-tpm-v1.0-rd-20231010.html).
 package tpm
 
 import (
-	"crypto"
-	"hash"
+	"fmt"
 	"io"
+	"log/slog"
 
-	"github.com/fido-device-onboard/go-fdo"
+	"github.com/google/go-tpm/tpm2/transport/linuxtpm"
 )
 
-// DeviceKeyType enumerates how DeviceKey is encoded and stored.
-type DeviceKeyType uint8
+// TPM represents a logical connection to a TPM.
+type TPM interface {
+	Send(input []byte) ([]byte, error)
+}
 
-// DeviceKeyType enum as defined in section 4.1
+// Closer represents a logical connection to a TPM and you can close it.
+type Closer interface {
+	TPM
+	io.Closer
+}
+
+// Open a TPM device at the given path.
 //
-// 0: FDO key (device key is derived from Unique String)
-// 1: The IDevID in the TPM
-// 2: An LDevID in the TPM
-const (
-	FdoDeviceKey    DeviceKeyType = 0
-	IDevIDDeviceKey DeviceKeyType = 1
-	LDevIDDeviceKey DeviceKeyType = 2
-)
-
-// DeviceCredential implements the signing and hmac interfaces and conforms to the
-// [TPM Draft Spec](https://fidoalliance.org/specs/FDO/securing-fdo-in-tpm-v1.0-rd-20231010/securing-fdo-in-tpm-v1.0-rd-20231010.html).
-type DeviceCredential struct {
-	fdo.DeviceCredential
-	DeviceKey       DeviceKeyType
-	DeviceKeyHandle uint32
-
-	// Path to the TPM resource manager
-	TpmRmPath string `cbor:"-"`
+// Clients should use /dev/tpmrm0 because using /dev/tpm0 requires more
+// extensive resource management that the kernel already handles for us
+// when using the kernel resource manager.
+func Open(path string) (Closer, error) {
+	switch path {
+	case "/dev/tpmrm0":
+		return linuxtpm.Open(path)
+	case "/dev/tpm0":
+		slog.Warn("direct use of the TPM can lead to resource exhaustion, use a TPM resource manager instead")
+		return linuxtpm.Open(path)
+	default:
+		return nil, fmt.Errorf("unsupported TPM device path: %s", path)
+	}
 }
-
-var _ fdo.KeyedHasher = (*DeviceCredential)(nil)
-
-// NewHmac returns a key-based hash (Hmac) using the given hash function some
-// secret.
-func (dc *DeviceCredential) NewHmac(alg fdo.HashAlg) (hash.Hash, error) {
-	panic("unimplemented")
-}
-
-var _ crypto.Signer = (*DeviceCredential)(nil)
-
-// Public returns the corresponding public key.
-func (dc *DeviceCredential) Public() crypto.PublicKey {
-	panic("unimplemented")
-}
-
-// Sign signs digest with the private key.
-func (dc *DeviceCredential) Sign(rand io.Reader, digest []byte, opts crypto.SignerOpts) ([]byte, error) {
-	panic("unimplemented")
-}
-
-// TODO: Helper methods for loading/storing to TPM

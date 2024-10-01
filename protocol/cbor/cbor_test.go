@@ -13,7 +13,6 @@ import (
 	"testing"
 
 	"github.com/fido-device-onboard/go-fdo"
-	"github.com/fido-device-onboard/go-fdo/blob"
 	"github.com/fido-device-onboard/go-fdo/cbor"
 )
 
@@ -1001,7 +1000,8 @@ func TestDecodeByteSlice(t *testing.T) {
 }
 
 func TestDecodeByteSliceNewtype(t *testing.T) {
-	type bstr blob.Hmac
+	type u8s []byte
+	type bstr u8s
 	var got bstr
 	for _, test := range []struct {
 		input  []byte
@@ -2071,6 +2071,26 @@ func TestMarshalEmbeddedPointer(t *testing.T) {
 		}
 		if !reflect.DeepEqual(expect, got) {
 			t.Errorf("expected %+v, got %+v", expect, got)
+		}
+	})
+}
+
+func TestOmitEmptyType(t *testing.T) {
+	t.Run("Marshal", func(t *testing.T) {
+		v := cbor.OmitEmpty[int]{Val: 0}
+		data, err := cbor.Marshal(&v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(data) > 0 {
+			t.Fatal("expected zero bytes")
+		}
+	})
+
+	t.Run("Unmarshal", func(t *testing.T) {
+		var v cbor.OmitEmpty[*int]
+		if err := cbor.Unmarshal([]byte{}, &v); err != nil {
+			t.Fatal(err)
 		}
 	})
 }

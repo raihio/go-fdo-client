@@ -23,6 +23,7 @@ import (
 	"github.com/fido-device-onboard/go-fdo/cbor"
 	"github.com/fido-device-onboard/go-fdo/cose"
 	"github.com/fido-device-onboard/go-fdo/kex"
+	"github.com/fido-device-onboard/go-fdo/protocol"
 )
 
 type diState struct {
@@ -33,25 +34,26 @@ type diState struct {
 
 type to0State struct {
 	Unique
-	Nonce fdo.Nonce
+	Nonce protocol.Nonce
 }
 
 type to1State struct {
 	Unique
-	Nonce  fdo.Nonce
+	Nonce  protocol.Nonce
 	SigAlg cose.SignatureAlgorithm
 }
 
 type to2State struct {
 	Unique
-	GUID        fdo.GUID
+	GUID        protocol.GUID
+	RvInfo      *[][]protocol.RvInstruction
 	Replacement struct {
-		GUID fdo.GUID
-		Hmac fdo.Hmac
+		GUID protocol.GUID
+		Hmac protocol.Hmac
 	}
 	KeyExchange keyExchange `cbor:",flat2"`
-	ProveDv     fdo.Nonce
-	SetupDv     fdo.Nonce
+	ProveDv     protocol.Nonce
+	SetupDv     protocol.Nonce
 	MTU         uint16
 }
 
@@ -96,10 +98,10 @@ type CA struct {
 // that do not need to persist beyond a single protocol session.
 type Service struct {
 	HmacSecret []byte
-	CAs        map[fdo.KeyType]CA
+	CAs        map[protocol.KeyType]CA
 }
 
-var _ fdo.TokenService = (*Service)(nil)
+var _ protocol.TokenService = (*Service)(nil)
 var _ fdo.DISessionState = (*Service)(nil)
 var _ fdo.TO0SessionState = (*Service)(nil)
 var _ fdo.TO1SessionState = (*Service)(nil)
@@ -163,24 +165,24 @@ func NewService() (*Service, error) {
 
 	return &Service{
 		HmacSecret: secret[:],
-		CAs: map[fdo.KeyType]CA{
-			fdo.Rsa2048RestrKeyType: {
+		CAs: map[protocol.KeyType]CA{
+			protocol.Rsa2048RestrKeyType: {
 				Key:   rsaKey,
 				Chain: rsaChain,
 			},
-			fdo.RsaPkcsKeyType: {
+			protocol.RsaPkcsKeyType: {
 				Key:   rsaKey,
 				Chain: rsaChain,
 			},
-			fdo.RsaPssKeyType: {
+			protocol.RsaPssKeyType: {
 				Key:   rsaKey,
 				Chain: rsaChain,
 			},
-			fdo.Secp256r1KeyType: {
+			protocol.Secp256r1KeyType: {
 				Key:   ec256Key,
 				Chain: ec256Chain,
 			},
-			fdo.Secp384r1KeyType: {
+			protocol.Secp384r1KeyType: {
 				Key:   ec384Key,
 				Chain: ec384Chain,
 			},
@@ -190,15 +192,15 @@ func NewService() (*Service, error) {
 
 // NewToken initializes state for a given protocol and return the
 // associated token.
-func (s Service) NewToken(ctx context.Context, proto fdo.Protocol) (string, error) {
+func (s Service) NewToken(ctx context.Context, proto protocol.Protocol) (string, error) {
 	switch proto {
-	case fdo.DIProtocol:
+	case protocol.DIProtocol:
 		return newToken[*diState](s.HmacSecret)
-	case fdo.TO0Protocol:
+	case protocol.TO0Protocol:
 		return newToken[*to0State](s.HmacSecret)
-	case fdo.TO1Protocol:
+	case protocol.TO1Protocol:
 		return newToken[*to1State](s.HmacSecret)
-	case fdo.TO2Protocol:
+	case protocol.TO2Protocol:
 		return newToken[*to2State](s.HmacSecret)
 	default:
 		return "", fmt.Errorf("unsupported protocol %s", proto)
@@ -234,54 +236,16 @@ func (s Service) InvalidateToken(ctx context.Context) error {
 	return nil
 }
 
-// NewDeviceCertChain creates a device certificate chain based on info
-// provided in the (non-normative) DI.AppStart message and also stores it
-// in session state.
-func (s Service) NewDeviceCertChain(ctx context.Context, info fdo.DeviceMfgInfo) ([]*x509.Certificate, error) {
-	// Sign CSR
-	csr := x509.CertificateRequest(info.CertInfo)
-	if err := csr.CheckSignature(); err != nil {
-		return nil, fmt.Errorf("invalid CSR: %w", err)
-	}
-	ca, ok := s.CAs[info.KeyType]
-	if !ok {
-		return nil, fmt.Errorf("unsupported key type %s", info.KeyType)
-	}
-	serialNumberLimit := new(big.Int).Lsh(big.NewInt(1), 128)
-	serialNumber, err := rand.Int(rand.Reader, serialNumberLimit)
-	if err != nil {
-		return nil, fmt.Errorf("error generating certificate serial number: %w", err)
-	}
-	template := &x509.Certificate{
-		SerialNumber: serialNumber,
-		Issuer:       ca.Chain[0].Subject,
-		Subject:      csr.Subject,
-		NotBefore:    time.Now(),
-		NotAfter:     time.Now().Add(30 * 360 * 24 * time.Hour), // Matches Java impl
-		KeyUsage:     x509.KeyUsageDigitalSignature,
-	}
-	der, err := x509.CreateCertificate(rand.Reader, template, ca.Chain[0], csr.PublicKey, ca.Key)
-	if err != nil {
-		return nil, fmt.Errorf("error signing CSR: %w", err)
-	}
-	cert, err := x509.ParseCertificate(der)
-	if err != nil {
-		return nil, fmt.Errorf("error parsing signed device cert: %w", err)
-	}
-	chain := append([]*x509.Certificate{cert}, ca.Chain...)
-
-	// Update state with cert chain
-	if err := update(ctx, s, func(state *diState) error {
+// SetDeviceCertChain sets the device certificate chain generated from
+// DI.AppStart info.
+func (s Service) SetDeviceCertChain(ctx context.Context, chain []*x509.Certificate) error {
+	return update(ctx, s, func(state *diState) error {
 		state.Chain = make([]*cbor.X509Certificate, len(chain))
 		for i, cert := range chain {
 			state.Chain[i] = (*cbor.X509Certificate)(cert)
 		}
 		return nil
-	}); err != nil {
-		return nil, err
-	}
-
-	return chain, nil
+	})
 }
 
 // DeviceCertChain gets a device certificate chain from the current
@@ -320,7 +284,7 @@ func (s Service) IncompleteVoucherHeader(ctx context.Context) (*fdo.VoucherHeade
 }
 
 // SetTO0SignNonce sets the Nonce expected in TO0.OwnerSign.
-func (s Service) SetTO0SignNonce(ctx context.Context, nonce fdo.Nonce) error {
+func (s Service) SetTO0SignNonce(ctx context.Context, nonce protocol.Nonce) error {
 	return update(ctx, s, func(state *to0State) error {
 		state.Nonce = nonce
 		return nil
@@ -328,17 +292,17 @@ func (s Service) SetTO0SignNonce(ctx context.Context, nonce fdo.Nonce) error {
 }
 
 // TO0SignNonce returns the Nonce expected in TO0.OwnerSign.
-func (s Service) TO0SignNonce(ctx context.Context) (fdo.Nonce, error) {
-	return fetch(ctx, s, func(state to0State) (fdo.Nonce, error) {
-		if state.Nonce == (fdo.Nonce{}) {
-			return fdo.Nonce{}, fdo.ErrNotFound
+func (s Service) TO0SignNonce(ctx context.Context) (protocol.Nonce, error) {
+	return fetch(ctx, s, func(state to0State) (protocol.Nonce, error) {
+		if state.Nonce == (protocol.Nonce{}) {
+			return protocol.Nonce{}, fdo.ErrNotFound
 		}
 		return state.Nonce, nil
 	})
 }
 
 // SetTO1ProofNonce sets the Nonce expected in TO1.ProveToRV.
-func (s Service) SetTO1ProofNonce(ctx context.Context, nonce fdo.Nonce) error {
+func (s Service) SetTO1ProofNonce(ctx context.Context, nonce protocol.Nonce) error {
 	return update(ctx, s, func(state *to1State) error {
 		state.Nonce = nonce
 		return nil
@@ -346,17 +310,17 @@ func (s Service) SetTO1ProofNonce(ctx context.Context, nonce fdo.Nonce) error {
 }
 
 // TO1ProofNonce returns the Nonce expected in TO1.ProveToRV.
-func (s Service) TO1ProofNonce(ctx context.Context) (fdo.Nonce, error) {
-	return fetch(ctx, s, func(state to1State) (fdo.Nonce, error) {
-		if state.Nonce == (fdo.Nonce{}) {
-			return fdo.Nonce{}, fdo.ErrNotFound
+func (s Service) TO1ProofNonce(ctx context.Context) (protocol.Nonce, error) {
+	return fetch(ctx, s, func(state to1State) (protocol.Nonce, error) {
+		if state.Nonce == (protocol.Nonce{}) {
+			return protocol.Nonce{}, fdo.ErrNotFound
 		}
 		return state.Nonce, nil
 	})
 }
 
 // SetGUID associates a voucher GUID with a TO2 session.
-func (s Service) SetGUID(ctx context.Context, guid fdo.GUID) error {
+func (s Service) SetGUID(ctx context.Context, guid protocol.GUID) error {
 	return update(ctx, s, func(state *to2State) error {
 		state.GUID = guid
 		return nil
@@ -364,17 +328,35 @@ func (s Service) SetGUID(ctx context.Context, guid fdo.GUID) error {
 }
 
 // GUID retrieves the GUID of the voucher associated with the session.
-func (s Service) GUID(ctx context.Context) (fdo.GUID, error) {
-	return fetch(ctx, s, func(state to2State) (fdo.GUID, error) {
-		if state.GUID == (fdo.GUID{}) {
-			return fdo.GUID{}, fdo.ErrNotFound
+func (s Service) GUID(ctx context.Context) (protocol.GUID, error) {
+	return fetch(ctx, s, func(state to2State) (protocol.GUID, error) {
+		if state.GUID == (protocol.GUID{}) {
+			return protocol.GUID{}, fdo.ErrNotFound
 		}
 		return state.GUID, nil
 	})
 }
 
+// SetRvInfo stores the rendezvous instructions to store at the end of TO2.
+func (s Service) SetRvInfo(ctx context.Context, rvInfo [][]protocol.RvInstruction) error {
+	return update(ctx, s, func(state *to2State) error {
+		state.RvInfo = &rvInfo
+		return nil
+	})
+}
+
+// RvInfo retrieves the rendezvous instructions to store at the end of TO2.
+func (s Service) RvInfo(ctx context.Context) ([][]protocol.RvInstruction, error) {
+	return fetch(ctx, s, func(state to2State) ([][]protocol.RvInstruction, error) {
+		if state.RvInfo == nil {
+			return nil, fdo.ErrNotFound
+		}
+		return *state.RvInfo, nil
+	})
+}
+
 // SetReplacementGUID stores the device GUID to persist at the end of TO2.
-func (s Service) SetReplacementGUID(ctx context.Context, guid fdo.GUID) error {
+func (s Service) SetReplacementGUID(ctx context.Context, guid protocol.GUID) error {
 	return update(ctx, s, func(state *to2State) error {
 		state.Replacement.GUID = guid
 		return nil
@@ -382,17 +364,17 @@ func (s Service) SetReplacementGUID(ctx context.Context, guid fdo.GUID) error {
 }
 
 // ReplacementGUID retrieves the device GUID to persist at the end of TO2.
-func (s Service) ReplacementGUID(ctx context.Context) (fdo.GUID, error) {
-	return fetch(ctx, s, func(state to2State) (fdo.GUID, error) {
-		if state.Replacement.GUID == (fdo.GUID{}) {
-			return fdo.GUID{}, fdo.ErrNotFound
+func (s Service) ReplacementGUID(ctx context.Context) (protocol.GUID, error) {
+	return fetch(ctx, s, func(state to2State) (protocol.GUID, error) {
+		if state.Replacement.GUID == (protocol.GUID{}) {
+			return protocol.GUID{}, fdo.ErrNotFound
 		}
 		return state.Replacement.GUID, nil
 	})
 }
 
 // SetReplacementHmac stores the voucher HMAC to persist at the end of TO2.
-func (s Service) SetReplacementHmac(ctx context.Context, hmac fdo.Hmac) error {
+func (s Service) SetReplacementHmac(ctx context.Context, hmac protocol.Hmac) error {
 	return update(ctx, s, func(state *to2State) error {
 		state.Replacement.Hmac = hmac
 		return nil
@@ -400,40 +382,41 @@ func (s Service) SetReplacementHmac(ctx context.Context, hmac fdo.Hmac) error {
 }
 
 // ReplacementHmac retrieves the voucher HMAC to persist at the end of TO2.
-func (s Service) ReplacementHmac(ctx context.Context) (fdo.Hmac, error) {
-	return fetch(ctx, s, func(state to2State) (fdo.Hmac, error) {
+func (s Service) ReplacementHmac(ctx context.Context) (protocol.Hmac, error) {
+	return fetch(ctx, s, func(state to2State) (protocol.Hmac, error) {
 		if state.Replacement.Hmac.Algorithm == 0 {
-			return fdo.Hmac{}, fdo.ErrNotFound
+			return protocol.Hmac{}, fdo.ErrNotFound
 		}
 		return state.Replacement.Hmac, nil
 	})
 }
 
-// SetSession updates the current key exchange/encryption session based on an
+// SetXSession updates the current key exchange/encryption session based on an
 // opaque "authorization" token.
-func (s Service) SetSession(ctx context.Context, suite kex.Suite, sess kex.Session) error {
+func (s Service) SetXSession(ctx context.Context, suite kex.Suite, sess kex.Session) error {
 	return update(ctx, s, func(state *to2State) error {
 		state.KeyExchange.Suite, state.KeyExchange.Sess = suite, sess
 		return nil
 	})
 }
 
-// Session returns the current key exchange/encryption session based on an
+// XSession returns the current key exchange/encryption session based on an
 // opaque "authorization" token.
-func (s Service) Session(ctx context.Context, token string) (kex.Suite, kex.Session, error) {
-	state, err := fromToken[to2State](token, s.HmacSecret)
-	if err != nil {
-		return "", nil, err
-	}
-	if state.KeyExchange.Sess == nil {
-		return "", nil, fdo.ErrNotFound
-	}
-	return state.KeyExchange.Suite, state.KeyExchange.Sess, nil
+func (s Service) XSession(ctx context.Context) (xSuite kex.Suite, xSession kex.Session, _ error) {
+	_, err := fetch(ctx, s, func(state to2State) (struct{}, error) {
+		if state.KeyExchange.Sess == nil {
+			return struct{}{}, fdo.ErrNotFound
+		}
+		xSuite = state.KeyExchange.Suite
+		xSession = state.KeyExchange.Sess
+		return struct{}{}, nil
+	})
+	return xSuite, xSession, err
 }
 
 // SetProveDeviceNonce stores the Nonce used in TO2.ProveDevice for use in
 // TO2.Done.
-func (s Service) SetProveDeviceNonce(ctx context.Context, nonce fdo.Nonce) error {
+func (s Service) SetProveDeviceNonce(ctx context.Context, nonce protocol.Nonce) error {
 	return update(ctx, s, func(state *to2State) error {
 		state.ProveDv = nonce
 		return nil
@@ -441,10 +424,10 @@ func (s Service) SetProveDeviceNonce(ctx context.Context, nonce fdo.Nonce) error
 }
 
 // ProveDeviceNonce returns the Nonce used in TO2.ProveDevice and TO2.Done.
-func (s Service) ProveDeviceNonce(ctx context.Context) (fdo.Nonce, error) {
-	return fetch(ctx, s, func(state to2State) (fdo.Nonce, error) {
-		if state.ProveDv == (fdo.Nonce{}) {
-			return fdo.Nonce{}, fdo.ErrNotFound
+func (s Service) ProveDeviceNonce(ctx context.Context) (protocol.Nonce, error) {
+	return fetch(ctx, s, func(state to2State) (protocol.Nonce, error) {
+		if state.ProveDv == (protocol.Nonce{}) {
+			return protocol.Nonce{}, fdo.ErrNotFound
 		}
 		return state.ProveDv, nil
 	})
@@ -452,7 +435,7 @@ func (s Service) ProveDeviceNonce(ctx context.Context) (fdo.Nonce, error) {
 
 // SetSetupDeviceNonce stores the Nonce used in TO2.SetupDevice for use in
 // TO2.Done2.
-func (s Service) SetSetupDeviceNonce(ctx context.Context, nonce fdo.Nonce) error {
+func (s Service) SetSetupDeviceNonce(ctx context.Context, nonce protocol.Nonce) error {
 	return update(ctx, s, func(state *to2State) error {
 		state.SetupDv = nonce
 		return nil
@@ -460,10 +443,10 @@ func (s Service) SetSetupDeviceNonce(ctx context.Context, nonce fdo.Nonce) error
 }
 
 // SetupDeviceNonce returns the Nonce used in TO2.SetupDevice and TO2.Done2.
-func (s Service) SetupDeviceNonce(ctx context.Context) (fdo.Nonce, error) {
-	return fetch(ctx, s, func(state to2State) (fdo.Nonce, error) {
-		if state.SetupDv == (fdo.Nonce{}) {
-			return fdo.Nonce{}, fdo.ErrNotFound
+func (s Service) SetupDeviceNonce(ctx context.Context) (protocol.Nonce, error) {
+	return fetch(ctx, s, func(state to2State) (protocol.Nonce, error) {
+		if state.SetupDv == (protocol.Nonce{}) {
+			return protocol.Nonce{}, fdo.ErrNotFound
 		}
 		return state.SetupDv, nil
 	})

@@ -16,8 +16,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/fido-device-onboard/go-fdo"
 	"github.com/fido-device-onboard/go-fdo/fdotest"
+	"github.com/fido-device-onboard/go-fdo/protocol"
 	"github.com/fido-device-onboard/go-fdo/sqlite"
 )
 
@@ -25,10 +25,7 @@ func TestClient(t *testing.T) {
 	state, cleanup := newDB(t)
 	defer func() { _ = cleanup() }()
 
-	state.AutoExtend = true
-	state.PreserveReplacedVouchers = true
-
-	fdotest.RunClientTestSuite(t, state, nil, nil, nil)
+	fdotest.RunClientTestSuite(t, state, nil, nil, nil, nil)
 }
 
 func TestServerState(t *testing.T) {
@@ -49,7 +46,11 @@ func newDB(t *testing.T) (_ *sqlite.DB, cleanup func() error) {
 	state.DebugLog = fdotest.TestingLog(t)
 
 	// Add manufacturer keys
-	rsaMfgKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	rsa2048MfgKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rsa3072MfgKey, err := rsa.GenerateKey(rand.Reader, 3072)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,11 +62,12 @@ func newDB(t *testing.T) (_ *sqlite.DB, cleanup func() error) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for keyType, key := range map[fdo.KeyType]crypto.Signer{
-		fdo.RsaPkcsKeyType:   rsaMfgKey,
-		fdo.RsaPssKeyType:    rsaMfgKey,
-		fdo.Secp256r1KeyType: ec256MfgKey,
-		fdo.Secp384r1KeyType: ec384MfgKey,
+	for keyType, key := range map[protocol.KeyType]crypto.Signer{
+		protocol.Rsa2048RestrKeyType: rsa2048MfgKey,
+		protocol.RsaPkcsKeyType:      rsa3072MfgKey,
+		protocol.RsaPssKeyType:       rsa3072MfgKey,
+		protocol.Secp256r1KeyType:    ec256MfgKey,
+		protocol.Secp384r1KeyType:    ec384MfgKey,
 	} {
 		chain, err := generateCA(key)
 		if err != nil {
@@ -77,7 +79,11 @@ func newDB(t *testing.T) (_ *sqlite.DB, cleanup func() error) {
 	}
 
 	// Add owner keys
-	rsaOwnerKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	rsa2048OwnerKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rsa3072OwnerKey, err := rsa.GenerateKey(rand.Reader, 3072)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,17 +96,20 @@ func newDB(t *testing.T) (_ *sqlite.DB, cleanup func() error) {
 		t.Fatal(err)
 	}
 
-	if err := state.AddOwnerKey(fdo.RsaPkcsKeyType, rsaOwnerKey, nil); err != nil {
-		t.Fatal(err)
-	}
-	if err := state.AddOwnerKey(fdo.RsaPssKeyType, rsaOwnerKey, nil); err != nil {
-		t.Fatal(err)
-	}
-	if err := state.AddOwnerKey(fdo.Secp256r1KeyType, ec256OwnerKey, nil); err != nil {
-		t.Fatal(err)
-	}
-	if err := state.AddOwnerKey(fdo.Secp384r1KeyType, ec384OwnerKey, nil); err != nil {
-		t.Fatal(err)
+	for keyType, key := range map[protocol.KeyType]crypto.Signer{
+		protocol.Rsa2048RestrKeyType: rsa2048OwnerKey,
+		protocol.RsaPkcsKeyType:      rsa3072OwnerKey,
+		protocol.RsaPssKeyType:       rsa3072OwnerKey,
+		protocol.Secp256r1KeyType:    ec256OwnerKey,
+		protocol.Secp384r1KeyType:    ec384OwnerKey,
+	} {
+		chain, err := generateCA(key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := state.AddOwnerKey(keyType, key, chain); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	return state, cleanup

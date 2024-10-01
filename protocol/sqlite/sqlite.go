@@ -7,10 +7,8 @@ package sqlite
 import (
 	"context"
 	"crypto"
-	"crypto/ecdsa"
 	"crypto/hmac"
 	"crypto/rand"
-	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/sha512"
 	"crypto/x509"
@@ -21,34 +19,25 @@ import (
 	"fmt"
 	"io"
 	"maps"
-	"math/big"
 	"path/filepath"
 	"slices"
 	"strings"
 	"time"
 
-	"github.com/ncruces/go-sqlite3/driver"         // Load database/sql driver
-	_ "github.com/ncruces/go-sqlite3/embed"        // Load sqlite WASM binary
-	_ "github.com/ncruces/go-sqlite3/vfs/adiantum" // Encryption VFS
+	"github.com/ncruces/go-sqlite3/driver"  // Load database/sql driver
+	_ "github.com/ncruces/go-sqlite3/embed" // Load sqlite WASM binary
 
 	"github.com/fido-device-onboard/go-fdo"
 	"github.com/fido-device-onboard/go-fdo/cbor"
 	"github.com/fido-device-onboard/go-fdo/cose"
+	"github.com/fido-device-onboard/go-fdo/custom"
 	"github.com/fido-device-onboard/go-fdo/kex"
+	"github.com/fido-device-onboard/go-fdo/protocol"
+	_ "github.com/fido-device-onboard/go-fdo/sqlite/xts" // Encryption VFS
 )
 
 // DB implements FDO server state persistence.
 type DB struct {
-	// When set, NewVoucher will extend the voucher. An owner key of the
-	// appropriate type must already be added.
-	AutoExtend bool
-
-	// When set, NewVoucher will cause an RV blob to be created.
-	AutoRegisterRV *fdo.To1d
-
-	// When set, ReplaceVoucher will not delete the original voucher.
-	PreserveReplacedVouchers bool
-
 	// Log all SQL queries to this optional writer.
 	DebugLog io.Writer
 
@@ -56,13 +45,13 @@ type DB struct {
 }
 
 // New creates or opens a SQLite database file using a single non-pooled
-// connection. If a password is specified, then the adiantum VFS will be used
+// connection. If a password is specified, then the xts VFS will be used
 // with a text key.
 func New(filename, password string) (*DB, error) {
 	// Open a new or existing DB
 	query := "?_pragma=foreign_keys(ON)"
 	if password != "" {
-		query += fmt.Sprintf("&vfs=adiantum&_pragma=textkey(%q)", password)
+		query += fmt.Sprintf("&vfs=xts&_pragma=textkey(%q)", password)
 	}
 	connector, err := (&driver.SQLite{}).OpenConnector("file:" + filepath.Clean(filename) + query)
 	if err != nil {
@@ -89,6 +78,7 @@ func New(filename, password string) (*DB, error) {
 		`CREATE TABLE IF NOT EXISTS rv_blobs
 			( guid BLOB PRIMARY KEY
 			, rv BLOB NOT NULL
+			, voucher BLOB NOT NULL
 			, exp INTEGER NOT NULL
 			)`,
 		`CREATE TABLE IF NOT EXISTS sessions
@@ -124,15 +114,22 @@ func New(filename, password string) (*DB, error) {
 		`CREATE TABLE IF NOT EXISTS to2_sessions
 			( session BLOB UNIQUE NOT NULL
 			, guid BLOB
+			, rv_info BLOB
 			, prove_device BLOB
 			, setup_device BLOB
 			, mtu INTEGER
 			, FOREIGN KEY(session) REFERENCES sessions(id) ON DELETE CASCADE
 			)`,
-		`CREATE TABLE IF NOT EXISTS vouchers
+		`CREATE TABLE IF NOT EXISTS mfg_vouchers
 			( guid BLOB PRIMARY KEY
 			, cbor BLOB NOT NULL
 			)`,
+		`CREATE TABLE IF NOT EXISTS owner_vouchers
+			( guid BLOB PRIMARY KEY
+			-- , serial_number TEXT NOT NULL
+			, cbor BLOB NOT NULL
+			)`,
+		// `CREATE INDEX idx_owner_voucher_serial_number ON owner_vouchers(serial_number)`,
 		`CREATE TABLE IF NOT EXISTS replacement_vouchers
 			( session BLOB UNIQUE NOT NULL
 			, guid BLOB
@@ -150,7 +147,7 @@ func New(filename, password string) (*DB, error) {
 		if _, err := db.Exec(sql); err != nil {
 			_ = db.Close()
 			if password != "" && strings.Contains(err.Error(), "file is not a database") {
-				return nil, fmt.Errorf("invalid database password")
+				return nil, fmt.Errorf("incorrect or missing database password")
 			}
 			return nil, fmt.Errorf("error creating tables: %w", err)
 		}
@@ -186,21 +183,24 @@ func debug(ctx context.Context, format string, a ...any) {
 
 // Compile-time check for interface implementation correctness
 var _ interface {
-	fdo.TokenService
+	protocol.TokenService
 	fdo.DISessionState
 	fdo.TO0SessionState
 	fdo.TO1SessionState
 	fdo.TO2SessionState
 	fdo.RendezvousBlobPersistentState
-	fdo.VoucherPersistentState
+	fdo.ManufacturerVoucherPersistentState
+	fdo.OwnerVoucherPersistentState
 	fdo.OwnerKeyPersistentState
+	fdo.AutoExtend
+	fdo.AutoTO0
 } = (*DB)(nil)
 
 const sessionIDSize = 16
 
 // NewToken initializes state for a given protocol and return the
 // associated token.
-func (db *DB) NewToken(ctx context.Context, protocol fdo.Protocol) (string, error) {
+func (db *DB) NewToken(ctx context.Context, protocol protocol.Protocol) (string, error) {
 	// Acquire HMAC secret
 	secret, err := db.loadOrStoreSecret(ctx)
 	if err != nil {
@@ -335,15 +335,15 @@ func (db *DB) insert(ctx context.Context, table string, kvs, upsertWhere map[str
 }
 
 func (db *DB) insertOrIgnore(ctx context.Context, table string, kvs map[string]any) error {
-	return insert(ctx, db.db, table, kvs, map[string]any{})
+	return insert(db.debugCtx(ctx), db.db, table, kvs, map[string]any{})
 }
 
 func (db *DB) update(ctx context.Context, table string, kvs, where map[string]any) error {
-	return update(ctx, db.db, table, kvs, where)
+	return update(db.debugCtx(ctx), db.db, table, kvs, where)
 }
 
 func (db *DB) query(ctx context.Context, table string, columns []string, where map[string]any, into ...any) error {
-	return query(ctx, db.db, table, columns, where, into...)
+	return query(db.debugCtx(ctx), db.db, table, columns, where, into...)
 }
 
 type execer interface {
@@ -450,23 +450,55 @@ func query(ctx context.Context, db querier, table string, columns []string, wher
 	return nil
 }
 
+func remove(ctx context.Context, db execer, table string, where map[string]any) error {
+	whereKeys := slices.Collect(maps.Keys(where))
+	clauses := make([]string, len(whereKeys))
+	for i, key := range whereKeys {
+		clauses[i] = "`" + key + "` = ?"
+	}
+	whereVals := make([]any, len(whereKeys))
+	for i, key := range whereKeys {
+		whereVals[i] = where[key]
+	}
+
+	query := fmt.Sprintf(
+		`DELETE FROM %s WHERE %s`,
+		table,
+		strings.Join(clauses, " AND "),
+	)
+	debug(ctx, "sqlite: %s\n%+v", query, where)
+
+	result, err := db.ExecContext(ctx, query, whereVals...)
+	if err != nil {
+		return err
+	}
+	if n, err := result.RowsAffected(); err != nil {
+		return err
+	} else if n < 1 {
+		return fdo.ErrNotFound
+	}
+	return nil
+}
+
 // AddManufacturerKey for signing device certificate chains. Unlike
 // [DB.AddOwnerKey], chain is always required.
-func (db *DB) AddManufacturerKey(keyType fdo.KeyType, key crypto.PrivateKey, chain []*x509.Certificate) error {
+func (db *DB) AddManufacturerKey(keyType protocol.KeyType, key crypto.PrivateKey, chain []*x509.Certificate) error {
 	der, err := x509.MarshalPKCS8PrivateKey(key)
 	if err != nil {
 		return err
 	}
-	return db.insertOrIgnore(db.debugCtx(context.Background()), "mfg_keys", map[string]any{
+	return db.insertOrIgnore(context.Background(), "mfg_keys", map[string]any{
 		"type":       int(keyType),
 		"pkcs8":      der,
 		"x509_chain": derEncode(chain),
 	})
 }
 
-func (db *DB) manufacturerKey(keyType fdo.KeyType) (crypto.PrivateKey, []*x509.Certificate, error) {
+// ManufacturerKey returns the signer of a given key type and its certificate
+// chain (required).
+func (db *DB) ManufacturerKey(keyType protocol.KeyType) (crypto.Signer, []*x509.Certificate, error) {
 	var pkcs8, der []byte
-	if err := db.query(db.debugCtx(context.Background()), "mfg_keys", []string{"pkcs8", "x509_chain"}, map[string]any{
+	if err := db.query(context.Background(), "mfg_keys", []string{"pkcs8", "x509_chain"}, map[string]any{
 		"type": int(keyType),
 	}, &pkcs8, &der); err != nil {
 		return nil, nil, err
@@ -483,69 +515,46 @@ func (db *DB) manufacturerKey(keyType fdo.KeyType) (crypto.PrivateKey, []*x509.C
 	if err != nil {
 		return nil, nil, fmt.Errorf("error parsing manufacturer certificate chain: %w", err)
 	}
-	return key, chain, nil
+	return key.(crypto.Signer), chain, nil
 }
 
-// NewDeviceCertChain creates a device certificate chain based on info
-// provided in the (non-normative) DI.AppStart message and also stores it
-// in session state.
-func (db *DB) NewDeviceCertChain(ctx context.Context, info fdo.DeviceMfgInfo) ([]*x509.Certificate, error) {
-	// Validate device info
-	csr := x509.CertificateRequest(info.CertInfo)
-	if err := csr.CheckSignature(); err != nil {
-		return nil, fmt.Errorf("invalid CSR: %w", err)
-	}
-
-	// Sign CSR
-	key, chain, err := db.manufacturerKey(info.KeyType)
-	if err != nil {
-		var unsupportedErr fdo.ErrUnsupportedKeyType
-		if errors.As(err, &unsupportedErr) {
-			return nil, unsupportedErr
-		}
-		return nil, fmt.Errorf("error retrieving manufacturer key [type=%s]: %w", info.KeyType, err)
-	}
-	serialNumberLimit := new(big.Int).Lsh(big.NewInt(1), 128)
-	serialNumber, err := rand.Int(rand.Reader, serialNumberLimit)
-	if err != nil {
-		return nil, fmt.Errorf("error generating certificate serial number: %w", err)
-	}
-	template := &x509.Certificate{
-		SerialNumber: serialNumber,
-		Issuer:       chain[0].Subject,
-		Subject:      csr.Subject,
-		NotBefore:    time.Now(),
-		NotAfter:     time.Now().Add(30 * 360 * 24 * time.Hour), // Matches Java impl
-		KeyUsage:     x509.KeyUsageDigitalSignature,
-	}
-	der, err := x509.CreateCertificate(rand.Reader, template, chain[0], csr.PublicKey, key)
-	if err != nil {
-		return nil, fmt.Errorf("error signing CSR: %w", err)
-	}
-	cert, err := x509.ParseCertificate(der)
-	if err != nil {
-		return nil, fmt.Errorf("error parsing signed device cert: %w", err)
-	}
-	chain = append([]*x509.Certificate{cert}, chain...)
-
-	// Store device info and associate it with session
+// SetDeviceCertChain sets the device certificate chain generated from
+// DI.AppStart info.
+func (db *DB) SetDeviceCertChain(ctx context.Context, chain []*x509.Certificate) error {
 	sessID, ok := db.sessionID(ctx)
 	if !ok {
-		return nil, fdo.ErrInvalidSession
+		return fdo.ErrInvalidSession
 	}
-	if err := db.insert(db.debugCtx(ctx), "device_info", map[string]any{
+	if err := db.insert(ctx, "device_info", map[string]any{
+		"x509_chain": derEncode(chain),
+		"session":    sessID,
+	}, nil); err != nil {
+		return fmt.Errorf("error persisting device certificate chain: %w", err)
+	}
+
+	return nil
+}
+
+// SetDeviceSelfInfo implements an optional interface to store info from
+// DI.AppStart.
+func (db *DB) SetDeviceSelfInfo(ctx context.Context, info *custom.DeviceMfgInfo) error {
+	sessID, ok := db.sessionID(ctx)
+	if !ok {
+		return fdo.ErrInvalidSession
+	}
+	if err := db.update(ctx, "device_info", map[string]any{
 		"key_type":      int(info.KeyType),
 		"key_encoding":  int(info.KeyEncoding),
 		"serial_number": info.SerialNumber,
 		"info_string":   info.DeviceInfo,
 		"csr":           info.CertInfo.Raw,
-		"x509_chain":    derEncode(chain),
-		"session":       sessID,
-	}, nil); err != nil {
-		return nil, fmt.Errorf("error persisting device certificate chain: %w", err)
+	}, map[string]any{
+		"session": sessID,
+	}); err != nil {
+		return fmt.Errorf("error persisting device certificate chain: %w", err)
 	}
 
-	return chain, nil
+	return nil
 }
 
 func derEncode(certs []*x509.Certificate) (der []byte) {
@@ -564,7 +573,7 @@ func (db *DB) DeviceCertChain(ctx context.Context) ([]*x509.Certificate, error) 
 	}
 
 	var der []byte
-	if err := db.query(db.debugCtx(ctx), "device_info", []string{"x509_chain"}, map[string]any{
+	if err := db.query(ctx, "device_info", []string{"x509_chain"}, map[string]any{
 		"session": sessID,
 	}, &der); err != nil {
 		return nil, err
@@ -588,7 +597,7 @@ func (db *DB) SetIncompleteVoucherHeader(ctx context.Context, ovh *fdo.VoucherHe
 		return fmt.Errorf("error marshaling ownership voucher header: %w", err)
 	}
 
-	return db.insert(db.debugCtx(ctx), "incomplete_vouchers", map[string]any{
+	return db.insert(ctx, "incomplete_vouchers", map[string]any{
 		"session": sessID,
 		"header":  ovhCBOR,
 	}, nil)
@@ -603,7 +612,7 @@ func (db *DB) IncompleteVoucherHeader(ctx context.Context) (*fdo.VoucherHeader, 
 	}
 
 	var ovhCBOR []byte
-	if err := db.query(db.debugCtx(ctx), "incomplete_vouchers", []string{"header"}, map[string]any{
+	if err := db.query(ctx, "incomplete_vouchers", []string{"header"}, map[string]any{
 		"session": sessID,
 	}, &ovhCBOR); err != nil {
 		return nil, err
@@ -620,12 +629,12 @@ func (db *DB) IncompleteVoucherHeader(ctx context.Context) (*fdo.VoucherHeader, 
 }
 
 // SetTO0SignNonce sets the Nonce expected in TO0.OwnerSign.
-func (db *DB) SetTO0SignNonce(ctx context.Context, nonce fdo.Nonce) error {
+func (db *DB) SetTO0SignNonce(ctx context.Context, nonce protocol.Nonce) error {
 	sessID, ok := db.sessionID(ctx)
 	if !ok {
 		return fdo.ErrInvalidSession
 	}
-	return db.insert(db.debugCtx(ctx), "to0_sessions",
+	return db.insert(ctx, "to0_sessions",
 		map[string]any{
 			"session": sessID,
 			"nonce":   nonce[:],
@@ -636,34 +645,34 @@ func (db *DB) SetTO0SignNonce(ctx context.Context, nonce fdo.Nonce) error {
 }
 
 // TO0SignNonce returns the Nonce expected in TO0.OwnerSign.
-func (db *DB) TO0SignNonce(ctx context.Context) (fdo.Nonce, error) {
+func (db *DB) TO0SignNonce(ctx context.Context) (protocol.Nonce, error) {
 	sessID, ok := db.sessionID(ctx)
 	if !ok {
-		return fdo.Nonce{}, fdo.ErrInvalidSession
+		return protocol.Nonce{}, fdo.ErrInvalidSession
 	}
 
 	var into []byte
-	if err := db.query(db.debugCtx(ctx), "to0_sessions", []string{"nonce"}, map[string]any{
+	if err := db.query(ctx, "to0_sessions", []string{"nonce"}, map[string]any{
 		"session": sessID,
 	}, &into); err != nil {
-		return fdo.Nonce{}, err
+		return protocol.Nonce{}, err
 	}
 	if into == nil {
-		return fdo.Nonce{}, fdo.ErrNotFound
+		return protocol.Nonce{}, fdo.ErrNotFound
 	}
 
-	var nonce fdo.Nonce
+	var nonce protocol.Nonce
 	_ = copy(nonce[:], into)
 	return nonce, nil
 }
 
 // SetTO1ProofNonce sets the Nonce expected in TO1.ProveToRV.
-func (db *DB) SetTO1ProofNonce(ctx context.Context, nonce fdo.Nonce) error {
+func (db *DB) SetTO1ProofNonce(ctx context.Context, nonce protocol.Nonce) error {
 	sessID, ok := db.sessionID(ctx)
 	if !ok {
 		return fdo.ErrInvalidSession
 	}
-	return db.insert(db.debugCtx(ctx), "to1_sessions",
+	return db.insert(ctx, "to1_sessions",
 		map[string]any{
 			"session": sessID,
 			"nonce":   nonce[:],
@@ -674,34 +683,34 @@ func (db *DB) SetTO1ProofNonce(ctx context.Context, nonce fdo.Nonce) error {
 }
 
 // TO1ProofNonce returns the Nonce expected in TO1.ProveToRV.
-func (db *DB) TO1ProofNonce(ctx context.Context) (fdo.Nonce, error) {
+func (db *DB) TO1ProofNonce(ctx context.Context) (protocol.Nonce, error) {
 	sessID, ok := db.sessionID(ctx)
 	if !ok {
-		return fdo.Nonce{}, fdo.ErrInvalidSession
+		return protocol.Nonce{}, fdo.ErrInvalidSession
 	}
 
 	var into []byte
-	if err := db.query(db.debugCtx(ctx), "to1_sessions", []string{"nonce"}, map[string]any{
+	if err := db.query(ctx, "to1_sessions", []string{"nonce"}, map[string]any{
 		"session": sessID,
 	}, &into); err != nil {
-		return fdo.Nonce{}, err
+		return protocol.Nonce{}, err
 	}
 	if into == nil {
-		return fdo.Nonce{}, fdo.ErrNotFound
+		return protocol.Nonce{}, fdo.ErrNotFound
 	}
 
-	var nonce fdo.Nonce
+	var nonce protocol.Nonce
 	_ = copy(nonce[:], into)
 	return nonce, nil
 }
 
 // SetGUID associates a voucher GUID with a TO2 session.
-func (db *DB) SetGUID(ctx context.Context, guid fdo.GUID) error {
+func (db *DB) SetGUID(ctx context.Context, guid protocol.GUID) error {
 	sessID, ok := db.sessionID(ctx)
 	if !ok {
 		return fdo.ErrInvalidSession
 	}
-	return db.insert(db.debugCtx(ctx), "to2_sessions",
+	return db.insert(ctx, "to2_sessions",
 		map[string]any{
 			"session": sessID,
 			"guid":    guid[:],
@@ -712,149 +721,112 @@ func (db *DB) SetGUID(ctx context.Context, guid fdo.GUID) error {
 }
 
 // GUID retrieves the GUID of the voucher associated with the session.
-func (db *DB) GUID(ctx context.Context) (fdo.GUID, error) {
+func (db *DB) GUID(ctx context.Context) (protocol.GUID, error) {
 	sessID, ok := db.sessionID(ctx)
 	if !ok {
-		return fdo.GUID{}, fdo.ErrInvalidSession
+		return protocol.GUID{}, fdo.ErrInvalidSession
 	}
 
 	var result []byte
-	if err := db.query(db.debugCtx(ctx), "to2_sessions", []string{"guid"}, map[string]any{
+	if err := db.query(ctx, "to2_sessions", []string{"guid"}, map[string]any{
 		"session": sessID,
 	}, &result); err != nil {
-		return fdo.GUID{}, err
+		return protocol.GUID{}, err
 	}
 	if result == nil {
-		return fdo.GUID{}, fdo.ErrNotFound
+		return protocol.GUID{}, fdo.ErrNotFound
 	}
 
-	if len(result) != len(fdo.GUID{}) {
-		return fdo.GUID{}, fmt.Errorf("invalid sized GUID in DB")
+	if len(result) != len(protocol.GUID{}) {
+		return protocol.GUID{}, fmt.Errorf("invalid sized GUID in DB")
 	}
 
-	var guid fdo.GUID
+	var guid protocol.GUID
 	_ = copy(guid[:], result)
 	return guid, nil
 }
 
-// NewVoucher creates and stores a new voucher.
-func (db *DB) NewVoucher(ctx context.Context, ov *fdo.Voucher) error {
-	if db.AutoExtend {
-		if err := db.autoExtend(ov); err != nil {
-			return fmt.Errorf("auto extend: %w", err)
-		}
+// SetRvInfo stores the rendezvous instructions to store at the end of TO2.
+func (db *DB) SetRvInfo(ctx context.Context, rvInfo [][]protocol.RvInstruction) error {
+	sessID, ok := db.sessionID(ctx)
+	if !ok {
+		return fdo.ErrInvalidSession
+	}
+	blob, err := cbor.Marshal(rvInfo)
+	if err != nil {
+		return fmt.Errorf("error marshaling RV info: %w", err)
+	}
+	return db.insert(ctx, "to2_sessions",
+		map[string]any{
+			"session": sessID,
+			"rv_info": blob,
+		},
+		map[string]any{
+			"session": sessID,
+		})
+}
 
-		if db.AutoRegisterRV != nil {
-			if err := db.autoRegisterRV(ctx, ov); err != nil {
-				return fmt.Errorf("auto register RV blob: %w", err)
-			}
-		}
+// RvInfo retrieves the rendezvous instructions to store at the end of TO2.
+func (db *DB) RvInfo(ctx context.Context) ([][]protocol.RvInstruction, error) {
+	sessID, ok := db.sessionID(ctx)
+	if !ok {
+		return nil, fdo.ErrInvalidSession
 	}
 
+	var result []byte
+	if err := db.query(ctx, "to2_sessions", []string{"rv_info"}, map[string]any{
+		"session": sessID,
+	}, &result); err != nil {
+		return nil, err
+	}
+	if result == nil {
+		return nil, fdo.ErrNotFound
+	}
+
+	var rvInfo [][]protocol.RvInstruction
+	if err := cbor.Unmarshal(result, &rvInfo); err != nil {
+		return nil, fmt.Errorf("error unmarshaling RV info: %w", err)
+	}
+	return rvInfo, nil
+}
+
+// NewVoucher creates and stores a voucher for a newly initialized device.
+// Note that the voucher may have entries if the server was configured for
+// auto voucher extension.
+func (db *DB) NewVoucher(ctx context.Context, ov *fdo.Voucher) error {
 	data, err := cbor.Marshal(ov)
 	if err != nil {
 		return fmt.Errorf("error marshaling ownership voucher: %w", err)
 	}
-	return db.insert(db.debugCtx(ctx), "vouchers", map[string]any{
+	table := "mfg_vouchers"
+	if len(ov.Entries) > 0 {
+		table = "owner_vouchers"
+	}
+	return db.insert(ctx, table, map[string]any{
 		"guid": ov.Header.Val.GUID[:],
 		"cbor": data,
 	}, nil)
 }
 
-func (db *DB) autoExtend(ov *fdo.Voucher) error {
-	keyType := ov.Header.Val.ManufacturerKey.Type
-	owner, _, err := db.manufacturerKey(keyType)
-	if err != nil {
-		return fmt.Errorf("error getting %s manufacturer key: %w", keyType, err)
-	}
-	nextOwner, _, err := db.ownerKey(keyType)
-	if err != nil {
-		return fmt.Errorf("error getting %s owner key: %w", keyType, err)
-	}
-	switch owner := owner.(type) {
-	case *ecdsa.PrivateKey:
-		nextOwner, ok := nextOwner.(*ecdsa.PrivateKey)
-		if !ok {
-			return fmt.Errorf("owner key must be %s", keyType)
-		}
-		extended, err := fdo.ExtendVoucher(ov, owner, &nextOwner.PublicKey, nil)
-		if err != nil {
-			return err
-		}
-		*ov = *extended
-	case *rsa.PrivateKey:
-		nextOwner, ok := nextOwner.(*rsa.PrivateKey)
-		if !ok {
-			return fmt.Errorf("owner key must be %s", keyType)
-		}
-		extended, err := fdo.ExtendVoucher(ov, owner, &nextOwner.PublicKey, nil)
-		if err != nil {
-			return err
-		}
-		*ov = *extended
-	default:
-		return fmt.Errorf("invalid key type %T", owner)
-	}
-
-	return nil
-}
-
-func (db *DB) autoRegisterRV(ctx context.Context, ov *fdo.Voucher) error {
-	keyType := ov.Header.Val.ManufacturerKey.Type
-	nextOwner, _, err := db.ownerKey(keyType)
-	if err != nil {
-		return fmt.Errorf("error getting %s owner key: %w", keyType, err)
-	}
-
-	var opts crypto.SignerOpts
-	switch keyType {
-	case fdo.Rsa2048RestrKeyType, fdo.RsaPkcsKeyType, fdo.RsaPssKeyType:
-		switch rsaPub := nextOwner.Public().(*rsa.PublicKey); rsaPub.Size() {
-		case 2048 / 8:
-			opts = crypto.SHA256
-		case 3072 / 8:
-			opts = crypto.SHA384
-		default:
-			return fmt.Errorf("unsupported RSA key size: %d bits", rsaPub.Size()*8)
-		}
-
-		if keyType == fdo.RsaPssKeyType {
-			opts = &rsa.PSSOptions{
-				SaltLength: rsa.PSSSaltLengthEqualsHash,
-				Hash:       opts.(crypto.Hash),
-			}
-		}
-	}
-
-	sign1 := cose.Sign1[fdo.To1d, []byte]{
-		Payload: cbor.NewByteWrap(*db.AutoRegisterRV),
-	}
-	if err := sign1.Sign(nextOwner, nil, nil, opts); err != nil {
-		return fmt.Errorf("error signing to1d: %w", err)
-	}
-	exp := time.Now().AddDate(30, 0, 0) // Expire in 30 years
-	if err := db.SetRVBlob(ctx, ov.Header.Val.GUID, &sign1, exp); err != nil {
-		return fmt.Errorf("error storing to1d: %w", err)
-	}
-
-	return nil
-}
-
-// ReplaceVoucher stores a new voucher, possibly deleting or marking the
-// previous voucher as replaced.
-func (db *DB) ReplaceVoucher(ctx context.Context, guid fdo.GUID, ov *fdo.Voucher) error {
+// AddVoucher stores the voucher of a device owned by the service.
+func (db *DB) AddVoucher(ctx context.Context, ov *fdo.Voucher) error {
 	data, err := cbor.Marshal(ov)
 	if err != nil {
 		return fmt.Errorf("error marshaling ownership voucher: %w", err)
 	}
-	if db.PreserveReplacedVouchers {
-		return db.insert(db.debugCtx(ctx), "vouchers",
-			map[string]any{
-				"guid": ov.Header.Val.GUID[:],
-				"cbor": data,
-			}, nil)
+	return db.insert(ctx, "owner_vouchers", map[string]any{
+		"guid": ov.Header.Val.GUID[:],
+		"cbor": data,
+	}, nil)
+}
+
+// ReplaceVoucher stores a new voucher, deleting the previous voucher.
+func (db *DB) ReplaceVoucher(ctx context.Context, guid protocol.GUID, ov *fdo.Voucher) error {
+	data, err := cbor.Marshal(ov)
+	if err != nil {
+		return fmt.Errorf("error marshaling ownership voucher: %w", err)
 	}
-	return db.update(db.debugCtx(ctx), "vouchers",
+	return db.update(ctx, "owner_vouchers",
 		map[string]any{
 			"guid": ov.Header.Val.GUID[:],
 			"cbor": data,
@@ -865,10 +837,47 @@ func (db *DB) ReplaceVoucher(ctx context.Context, guid fdo.GUID, ov *fdo.Voucher
 	)
 }
 
-// Voucher retrieves a voucher by GUID.
-func (db *DB) Voucher(ctx context.Context, guid fdo.GUID) (*fdo.Voucher, error) {
+// RemoveVoucher untracks a voucher, deleting it, and returns it for extension.
+func (db *DB) RemoveVoucher(ctx context.Context, guid protocol.GUID) (*fdo.Voucher, error) {
+	ctx = db.debugCtx(ctx)
+
+	tx, err := db.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("error starting transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
 	var data []byte
-	if err := db.query(db.debugCtx(ctx), "vouchers", []string{"cbor"},
+	if err := query(ctx, tx, "owner_vouchers", []string{"cbor"},
+		map[string]any{"guid": guid[:]},
+		&data,
+	); err != nil {
+		return nil, err
+	}
+	if data == nil {
+		return nil, fdo.ErrNotFound
+	}
+
+	var ov fdo.Voucher
+	if err := cbor.Unmarshal(data, &ov); err != nil {
+		return nil, fmt.Errorf("error unmarshaling ownership voucher: %w", err)
+	}
+
+	if err := remove(ctx, tx, "owner_vouchers", map[string]any{"guid": guid[:]}); err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	return &ov, nil
+}
+
+// Voucher retrieves a voucher by GUID.
+func (db *DB) Voucher(ctx context.Context, guid protocol.GUID) (*fdo.Voucher, error) {
+	var data []byte
+	if err := db.query(ctx, "owner_vouchers", []string{"cbor"},
 		map[string]any{"guid": guid[:]},
 		&data,
 	); err != nil {
@@ -886,12 +895,12 @@ func (db *DB) Voucher(ctx context.Context, guid fdo.GUID) (*fdo.Voucher, error) 
 }
 
 // SetReplacementGUID stores the device GUID to persist at the end of TO2.
-func (db *DB) SetReplacementGUID(ctx context.Context, guid fdo.GUID) error {
+func (db *DB) SetReplacementGUID(ctx context.Context, guid protocol.GUID) error {
 	sessID, ok := db.sessionID(ctx)
 	if !ok {
 		return fdo.ErrInvalidSession
 	}
-	return db.insert(db.debugCtx(ctx), "replacement_vouchers",
+	return db.insert(ctx, "replacement_vouchers",
 		map[string]any{
 			"session": sessID,
 			"guid":    guid[:],
@@ -903,38 +912,38 @@ func (db *DB) SetReplacementGUID(ctx context.Context, guid fdo.GUID) error {
 }
 
 // ReplacementGUID retrieves the device GUID to persist at the end of TO2.
-func (db *DB) ReplacementGUID(ctx context.Context) (fdo.GUID, error) {
+func (db *DB) ReplacementGUID(ctx context.Context) (protocol.GUID, error) {
 	sessID, ok := db.sessionID(ctx)
 	if !ok {
-		return fdo.GUID{}, fdo.ErrInvalidSession
+		return protocol.GUID{}, fdo.ErrInvalidSession
 	}
 
 	var into []byte
-	if err := db.query(db.debugCtx(ctx), "replacement_vouchers", []string{"guid"},
+	if err := db.query(ctx, "replacement_vouchers", []string{"guid"},
 		map[string]any{"session": sessID}, &into,
 	); err != nil {
-		return fdo.GUID{}, err
+		return protocol.GUID{}, err
 	}
 	if into == nil {
-		return fdo.GUID{}, fdo.ErrNotFound
+		return protocol.GUID{}, fdo.ErrNotFound
 	}
 
-	if len(into) != len(fdo.GUID{}) {
-		return fdo.GUID{}, fmt.Errorf("invalid sized GUID in DB")
+	if len(into) != len(protocol.GUID{}) {
+		return protocol.GUID{}, fmt.Errorf("invalid sized GUID in DB")
 	}
 
-	var guid fdo.GUID
+	var guid protocol.GUID
 	_ = copy(guid[:], into)
 	return guid, nil
 }
 
 // SetReplacementHmac stores the voucher HMAC to persist at the end of TO2.
-func (db *DB) SetReplacementHmac(ctx context.Context, hmac fdo.Hmac) error {
+func (db *DB) SetReplacementHmac(ctx context.Context, hmac protocol.Hmac) error {
 	sessID, ok := db.sessionID(ctx)
 	if !ok {
 		return fdo.ErrInvalidSession
 	}
-	return db.insert(db.debugCtx(ctx), "replacement_vouchers",
+	return db.insert(ctx, "replacement_vouchers",
 		map[string]any{
 			"session": sessID,
 			"hmac":    hmac.Value,
@@ -946,41 +955,41 @@ func (db *DB) SetReplacementHmac(ctx context.Context, hmac fdo.Hmac) error {
 }
 
 // ReplacementHmac retrieves the voucher HMAC to persist at the end of TO2.
-func (db *DB) ReplacementHmac(ctx context.Context) (fdo.Hmac, error) {
+func (db *DB) ReplacementHmac(ctx context.Context) (protocol.Hmac, error) {
 	sessID, ok := db.sessionID(ctx)
 	if !ok {
-		return fdo.Hmac{}, fdo.ErrInvalidSession
+		return protocol.Hmac{}, fdo.ErrInvalidSession
 	}
 
 	var hmac []byte
-	if err := db.query(db.debugCtx(ctx), "replacement_vouchers", []string{"hmac"},
+	if err := db.query(ctx, "replacement_vouchers", []string{"hmac"},
 		map[string]any{"session": sessID}, &hmac,
 	); err != nil {
-		return fdo.Hmac{}, err
+		return protocol.Hmac{}, err
 	}
 	if hmac == nil {
-		return fdo.Hmac{}, fdo.ErrNotFound
+		return protocol.Hmac{}, fdo.ErrNotFound
 	}
 
-	var alg fdo.HashAlg
+	var alg protocol.HashAlg
 	switch len(hmac) {
 	case sha256.New().Size():
-		alg = fdo.HmacSha256Hash
+		alg = protocol.HmacSha256Hash
 	case sha512.New384().Size():
-		alg = fdo.HmacSha384Hash
+		alg = protocol.HmacSha384Hash
 	default:
-		return fdo.Hmac{}, fmt.Errorf("invalid hmac length: %d", len(hmac))
+		return protocol.Hmac{}, fmt.Errorf("invalid hmac length: %d", len(hmac))
 	}
 
-	return fdo.Hmac{
+	return protocol.Hmac{
 		Algorithm: alg,
 		Value:     hmac,
 	}, nil
 }
 
-// SetSession updates the current key exchange/encryption session based on
+// SetXSession updates the current key exchange/encryption session based on
 // an opaque "authorization" token.
-func (db *DB) SetSession(ctx context.Context, suite kex.Suite, sess kex.Session) error {
+func (db *DB) SetXSession(ctx context.Context, suite kex.Suite, sess kex.Session) error {
 	sessID, ok := db.sessionID(ctx)
 	if !ok {
 		return fdo.ErrInvalidSession
@@ -995,7 +1004,7 @@ func (db *DB) SetSession(ctx context.Context, suite kex.Suite, sess kex.Session)
 		return fmt.Errorf("error marshaling key exchange key exchange state: %w", err)
 	}
 
-	return db.insert(db.debugCtx(ctx), "key_exchanges",
+	return db.insert(ctx, "key_exchanges",
 		map[string]any{
 			"session": sessID,
 			"suite":   string(suite),
@@ -1007,17 +1016,17 @@ func (db *DB) SetSession(ctx context.Context, suite kex.Suite, sess kex.Session)
 	)
 }
 
-// Session returns the current key exchange/encryption session based on an
+// XSession returns the current key exchange/encryption session based on an
 // opaque "authorization" token.
-func (db *DB) Session(ctx context.Context, token string) (kex.Suite, kex.Session, error) {
-	sessID, ok := db.sessionID(db.TokenContext(ctx, token))
+func (db *DB) XSession(ctx context.Context) (kex.Suite, kex.Session, error) {
+	sessID, ok := db.sessionID(ctx)
 	if !ok {
 		return "", nil, fdo.ErrInvalidSession
 	}
 
 	var suite string
 	var sessData []byte
-	if err := db.query(db.debugCtx(ctx), "key_exchanges", []string{"suite", "cbor"}, map[string]any{
+	if err := db.query(ctx, "key_exchanges", []string{"suite", "cbor"}, map[string]any{
 		"session": sessID,
 	}, &suite, &sessData); err != nil {
 		return "", nil, fmt.Errorf("error querying key exchange session: %w", err)
@@ -1040,12 +1049,12 @@ func (db *DB) Session(ctx context.Context, token string) (kex.Suite, kex.Session
 
 // SetProveDeviceNonce stores the Nonce used in TO2.ProveDevice for use in
 // TO2.Done.
-func (db *DB) SetProveDeviceNonce(ctx context.Context, nonce fdo.Nonce) error {
+func (db *DB) SetProveDeviceNonce(ctx context.Context, nonce protocol.Nonce) error {
 	sessID, ok := db.sessionID(ctx)
 	if !ok {
 		return fdo.ErrInvalidSession
 	}
-	return db.insert(db.debugCtx(ctx), "to2_sessions",
+	return db.insert(ctx, "to2_sessions",
 		map[string]any{
 			"session":      sessID,
 			"prove_device": nonce[:],
@@ -1057,38 +1066,38 @@ func (db *DB) SetProveDeviceNonce(ctx context.Context, nonce fdo.Nonce) error {
 }
 
 // ProveDeviceNonce returns the Nonce used in TO2.ProveDevice and TO2.Done.
-func (db *DB) ProveDeviceNonce(ctx context.Context) (fdo.Nonce, error) {
+func (db *DB) ProveDeviceNonce(ctx context.Context) (protocol.Nonce, error) {
 	sessID, ok := db.sessionID(ctx)
 	if !ok {
-		return fdo.Nonce{}, fdo.ErrInvalidSession
+		return protocol.Nonce{}, fdo.ErrInvalidSession
 	}
 
 	var into []byte
-	if err := db.query(db.debugCtx(ctx), "to2_sessions", []string{"prove_device"}, map[string]any{
+	if err := db.query(ctx, "to2_sessions", []string{"prove_device"}, map[string]any{
 		"session": sessID,
 	}, &into); err != nil {
-		return fdo.Nonce{}, err
+		return protocol.Nonce{}, err
 	}
 	if into == nil {
-		return fdo.Nonce{}, fdo.ErrNotFound
+		return protocol.Nonce{}, fdo.ErrNotFound
 	}
-	if len(into) != len(fdo.Nonce{}) {
-		return fdo.Nonce{}, fmt.Errorf("invalid sized nonce in DB")
+	if len(into) != len(protocol.Nonce{}) {
+		return protocol.Nonce{}, fmt.Errorf("invalid sized nonce in DB")
 	}
 
-	var nonce fdo.Nonce
+	var nonce protocol.Nonce
 	_ = copy(nonce[:], into)
 	return nonce, nil
 }
 
 // SetSetupDeviceNonce stores the Nonce used in TO2.SetupDevice for use in
 // TO2.Done2.
-func (db *DB) SetSetupDeviceNonce(ctx context.Context, nonce fdo.Nonce) error {
+func (db *DB) SetSetupDeviceNonce(ctx context.Context, nonce protocol.Nonce) error {
 	sessID, ok := db.sessionID(ctx)
 	if !ok {
 		return fdo.ErrInvalidSession
 	}
-	return db.insert(db.debugCtx(ctx), "to2_sessions",
+	return db.insert(ctx, "to2_sessions",
 		map[string]any{
 			"session":      sessID,
 			"setup_device": nonce[:],
@@ -1101,54 +1110,55 @@ func (db *DB) SetSetupDeviceNonce(ctx context.Context, nonce fdo.Nonce) error {
 
 // SetupDeviceNonce returns the Nonce used in TO2.SetupDevice and
 // TO2.Done2.
-func (db *DB) SetupDeviceNonce(ctx context.Context) (fdo.Nonce, error) {
+func (db *DB) SetupDeviceNonce(ctx context.Context) (protocol.Nonce, error) {
 	sessID, ok := db.sessionID(ctx)
 	if !ok {
-		return fdo.Nonce{}, fdo.ErrInvalidSession
+		return protocol.Nonce{}, fdo.ErrInvalidSession
 	}
 
 	var into []byte
-	if err := db.query(db.debugCtx(ctx), "to2_sessions", []string{"setup_device"}, map[string]any{
+	if err := db.query(ctx, "to2_sessions", []string{"setup_device"}, map[string]any{
 		"session": sessID,
 	}, &into); err != nil {
-		return fdo.Nonce{}, err
+		return protocol.Nonce{}, err
 	}
 	if into == nil {
-		return fdo.Nonce{}, fdo.ErrNotFound
+		return protocol.Nonce{}, fdo.ErrNotFound
 	}
-	if len(into) != len(fdo.Nonce{}) {
-		return fdo.Nonce{}, fmt.Errorf("invalid sized nonce in DB")
+	if len(into) != len(protocol.Nonce{}) {
+		return protocol.Nonce{}, fmt.Errorf("invalid sized nonce in DB")
 	}
 
-	var nonce fdo.Nonce
+	var nonce protocol.Nonce
 	_ = copy(nonce[:], into)
 	return nonce, nil
 }
 
 // AddOwnerKey to retrieve with [DB.Signer]. chain may be nil, in which
 // case X509 public key encoding will be used instead of X5Chain.
-func (db *DB) AddOwnerKey(keyType fdo.KeyType, key crypto.PrivateKey, chain []*x509.Certificate) error {
+func (db *DB) AddOwnerKey(keyType protocol.KeyType, key crypto.PrivateKey, chain []*x509.Certificate) error {
 	der, err := x509.MarshalPKCS8PrivateKey(key)
 	if err != nil {
 		return err
 	}
 	if chain == nil {
-		return db.insertOrIgnore(db.debugCtx(context.Background()), "owner_keys", map[string]any{
+		return db.insertOrIgnore(context.Background(), "owner_keys", map[string]any{
 			"type":  int(keyType),
 			"pkcs8": der,
 		})
 	}
-	return db.insertOrIgnore(db.debugCtx(context.Background()), "owner_keys", map[string]any{
+	return db.insertOrIgnore(context.Background(), "owner_keys", map[string]any{
 		"type":       int(keyType),
 		"pkcs8":      der,
 		"x509_chain": derEncode(chain),
 	})
 }
 
-// TODO: Randomize result when there are multiple rows?
-func (db *DB) ownerKey(keyType fdo.KeyType) (crypto.Signer, []*x509.Certificate, error) {
+// OwnerKey returns the private key matching a given key type and optionally
+// its certificate chain.
+func (db *DB) OwnerKey(keyType protocol.KeyType) (crypto.Signer, []*x509.Certificate, error) {
 	var keyDer, certChainDer []byte
-	if err := db.query(db.debugCtx(context.Background()), "owner_keys", []string{"pkcs8", "x509_chain"}, map[string]any{
+	if err := db.query(context.Background(), "owner_keys", []string{"pkcs8", "x509_chain"}, map[string]any{
 		"type": int(keyType),
 	}, &keyDer, &certChainDer); err != nil {
 		return nil, nil, fmt.Errorf("error querying owner key [type=%s]: %w", keyType, err)
@@ -1170,22 +1180,13 @@ func (db *DB) ownerKey(keyType fdo.KeyType) (crypto.Signer, []*x509.Certificate,
 	return key.(crypto.Signer), chain, nil
 }
 
-// Signer returns the private key matching a given key type.
-func (db *DB) Signer(keyType fdo.KeyType) (crypto.Signer, bool) {
-	key, _, err := db.ownerKey(keyType)
-	if err != nil {
-		return nil, false
-	}
-	return key, true
-}
-
 // SetMTU sets the max service info size the device may receive.
 func (db *DB) SetMTU(ctx context.Context, mtu uint16) error {
 	sessID, ok := db.sessionID(ctx)
 	if !ok {
 		return fdo.ErrInvalidSession
 	}
-	return db.insert(db.debugCtx(ctx), "to2_sessions",
+	return db.insert(ctx, "to2_sessions",
 		map[string]any{
 			"session": sessID,
 			"mtu":     int(mtu),
@@ -1203,7 +1204,7 @@ func (db *DB) MTU(ctx context.Context) (uint16, error) {
 	}
 
 	var mtu sql.Null[uint16]
-	if err := db.query(db.debugCtx(ctx), "to2_sessions", []string{"mtu"}, map[string]any{
+	if err := db.query(ctx, "to2_sessions", []string{"mtu"}, map[string]any{
 		"session": sessID,
 	}, &mtu); err != nil {
 		return 0, err
@@ -1216,41 +1217,54 @@ func (db *DB) MTU(ctx context.Context) (uint16, error) {
 }
 
 // SetRVBlob sets the owner rendezvous blob for a device.
-func (db *DB) SetRVBlob(ctx context.Context, guid fdo.GUID, to1d *cose.Sign1[fdo.To1d, []byte], exp time.Time) error {
+func (db *DB) SetRVBlob(ctx context.Context, ov *fdo.Voucher, to1d *cose.Sign1[protocol.To1d, []byte], exp time.Time) error {
 	blob, err := cbor.Marshal(to1d)
 	if err != nil {
 		return fmt.Errorf("error marshaling rendezvous blob: %w", err)
 	}
-	return db.insert(db.debugCtx(ctx), "rv_blobs",
+
+	voucher, err := cbor.Marshal(ov)
+	if err != nil {
+		return fmt.Errorf("error marshaling ownership voucher: %w", err)
+	}
+
+	guid := ov.Header.Val.GUID[:]
+	return db.insert(ctx, "rv_blobs",
 		map[string]any{
-			"guid": guid[:],
-			"rv":   blob,
-			"exp":  exp.Unix(),
+			"guid":    guid,
+			"rv":      blob,
+			"voucher": voucher,
+			"exp":     exp.Unix(),
 		},
 		map[string]any{
-			"guid": guid[:],
+			"guid": guid,
 		})
 }
 
 // RVBlob returns the owner rendezvous blob for a device.
-func (db *DB) RVBlob(ctx context.Context, guid fdo.GUID) (*cose.Sign1[fdo.To1d, []byte], error) {
-	var blob []byte
+func (db *DB) RVBlob(ctx context.Context, guid protocol.GUID) (*cose.Sign1[protocol.To1d, []byte], *fdo.Voucher, error) {
+	var blob, voucher []byte
 	var exp sql.NullInt64
-	if err := db.query(db.debugCtx(ctx), "rv_blobs", []string{"rv", "exp"}, map[string]any{
+	if err := db.query(ctx, "rv_blobs", []string{"rv", "voucher", "exp"}, map[string]any{
 		"guid": guid[:],
-	}, &blob, &exp); err != nil {
-		return nil, err
+	}, &blob, &voucher, &exp); err != nil {
+		return nil, nil, err
 	}
 	if blob == nil || !exp.Valid {
-		return nil, fdo.ErrNotFound
+		return nil, nil, fdo.ErrNotFound
 	}
 	if time.Now().After(time.Unix(exp.Int64, 0)) {
-		return nil, fdo.ErrNotFound
+		return nil, nil, fdo.ErrNotFound
 	}
 
-	var to1d cose.Sign1[fdo.To1d, []byte]
+	var to1d cose.Sign1[protocol.To1d, []byte]
 	if err := cbor.Unmarshal(blob, &to1d); err != nil {
-		return nil, fmt.Errorf("error unmarshaling rendezvous blob: %w", err)
+		return nil, nil, fmt.Errorf("error unmarshaling rendezvous blob: %w", err)
 	}
-	return &to1d, nil
+	var ov fdo.Voucher
+	if err := cbor.Unmarshal(voucher, &ov); err != nil {
+		return nil, nil, fmt.Errorf("error unmarshaling ownership voucher: %w", err)
+	}
+
+	return &to1d, &ov, nil
 }

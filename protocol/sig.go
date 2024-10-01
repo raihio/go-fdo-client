@@ -9,6 +9,7 @@ import (
 	"fmt"
 
 	"github.com/fido-device-onboard/go-fdo/cose"
+	"github.com/fido-device-onboard/go-fdo/protocol"
 )
 
 // sigInfo is used to encode parameters for the device attestation signature.
@@ -47,30 +48,6 @@ type sigInfo struct {
 	Info []byte
 }
 
-/*
-// This function is not used because HMAC support is implicitly required in FDO
-// by the rules: RSA2048->SHA256, RSA3072->SHA384, secp256r1->SHA256,
-// secp384r1->SHA384.
-
-func sigInfoFor(key crypto.Signer, usePSS bool, hmac KeyedHasher) sigInfo {
-	switch _, isECDSA := key.Public().(*ecdsa.PublicKey); {
-	case isECDSA && hmac.Supports(HmacSha384Hash):
-		return sigInfo{Type: cose.ES384Alg}
-	case isECDSA && !hmac.Supports(HmacSha384Hash):
-		return sigInfo{Type: cose.ES256Alg}
-	case !isECDSA && usePSS && hmac.Supports(HmacSha384Hash):
-		return sigInfo{Type: cose.PS384Alg}
-	case !isECDSA && !usePSS && hmac.Supports(HmacSha384Hash):
-		return sigInfo{Type: cose.RS384Alg}
-	case !isECDSA && usePSS && !hmac.Supports(HmacSha384Hash):
-		return sigInfo{Type: cose.PS384Alg}
-	case !isECDSA && !usePSS && !hmac.Supports(HmacSha384Hash):
-		return sigInfo{Type: cose.RS256Alg}
-	}
-	panic("unreachable")
-}
-*/
-
 func sigInfoFor(key crypto.Signer, usePSS bool) (*sigInfo, error) {
 	opts, err := signOptsFor(key, usePSS)
 	if err != nil {
@@ -105,17 +82,18 @@ func signOptsFor(key crypto.Signer, usePSS bool) (crypto.SignerOpts, error) {
 	return opts, nil
 }
 
-func keyTypeFor(alg cose.SignatureAlgorithm) (KeyType, crypto.SignerOpts, error) {
+func keyTypeFor(alg cose.SignatureAlgorithm) (protocol.KeyType, crypto.SignerOpts, error) {
 	switch alg {
 	case cose.ES256Alg:
-		return Secp256r1KeyType, nil, nil
+		return protocol.Secp256r1KeyType, nil, nil
 	case cose.ES384Alg:
-		return Secp384r1KeyType, nil, nil
-	case cose.RS256Alg, cose.RS384Alg:
-		// TODO: Support RSA2048Restr?
-		return RsaPkcsKeyType, alg, nil
+		return protocol.Secp384r1KeyType, nil, nil
+	case cose.RS256Alg:
+		return protocol.Rsa2048RestrKeyType, alg, nil
+	case cose.RS384Alg:
+		return protocol.RsaPkcsKeyType, alg, nil
 	case cose.PS256Alg, cose.PS384Alg:
-		return RsaPssKeyType, &rsa.PSSOptions{
+		return protocol.RsaPssKeyType, &rsa.PSSOptions{
 			SaltLength: rsa.PSSSaltLengthEqualsHash,
 			Hash:       alg.HashFunc(),
 		}, nil

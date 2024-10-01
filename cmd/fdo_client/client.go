@@ -277,16 +277,11 @@ func transferOwnership(cli *fdo.Client, rvInfo [][]fdo.RvInstruction) *fdo.Devic
 		}
 		break
 	}
+
 	if to1d != nil {
 		for _, to2Addr := range to1d.Payload.Val.RV {
-			var host string
-			switch {
-			case to2Addr.DNSAddress != nil:
-				host = *to2Addr.DNSAddress
-			case to2Addr.IPAddress != nil:
-				host = to2Addr.IPAddress.String()
-			default:
-				// invalid to1d: cannot have addr with null DNS and IP addresses
+			if to2Addr.DNSAddress == nil && to2Addr.IPAddress == nil {
+				slog.Error("Error: Both IP and DNS can't be null")
 				continue
 			}
 
@@ -303,7 +298,17 @@ func transferOwnership(cli *fdo.Client, rvInfo [][]fdo.RvInstruction) *fdo.Devic
 				port = strconv.Itoa(int(to2Addr.Port))
 			}
 
-			to2URLs = append(to2URLs, scheme+net.JoinHostPort(host, port))
+			// Check and add DNS address if valid and resolvable
+			if to2Addr.DNSAddress != nil && isResolvableDNS(*to2Addr.DNSAddress) {
+				host := *to2Addr.DNSAddress
+				to2URLs = append(to2URLs, scheme+net.JoinHostPort(host, port))
+			}
+
+			// Check and add IP address if valid
+			if to2Addr.IPAddress != nil && isValidIP(to2Addr.IPAddress.String()) {
+				host := to2Addr.IPAddress.String()
+				to2URLs = append(to2URLs, scheme+net.JoinHostPort(host, port))
+			}
 		}
 	}
 
@@ -348,4 +353,15 @@ func transferOwnership2(cli *fdo.Client, baseURL string, to1d *cose.Sign1[fdo.To
 		return nil
 	}
 	return cred
+}
+
+// Function to validate if a string is a valid IP address
+func isValidIP(ip string) bool {
+	return net.ParseIP(ip) != nil
+}
+
+// Function to check if a DNS address is resolvable
+func isResolvableDNS(dns string) bool {
+	_, err := net.LookupHost(dns)
+	return err == nil
 }

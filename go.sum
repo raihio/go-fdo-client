@@ -4,6 +4,12 @@ github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSs
 github.com/fatih/color v1.9.0/go.mod h1:eQcE1qtQxscV5RaZvpXrrb8Drkc3/DdQ+uUYCNjL+zU=
 github.com/fatih/color v1.16.0 h1:zmkK9Ngbjj+K0yRhTVONQh1p/HknKYSlNT+vZCzyokM=
 github.com/fatih/color v1.16.0/go.mod h1:fL2Sau1YI5c0pdGEVCbKQbLXB6edEj1ZgiY4NijnWvE=
+github.com/fido-device-onboard/go-fdo v0.0.0-20241004025821-5b174bc99e6f h1:b79c53Qkb9Ke2NlrYuRAFjG1OVzOG71Zeu8YH/joO24=
+github.com/fido-device-onboard/go-fdo v0.0.0-20241004025821-5b174bc99e6f/go.mod h1:8W0CU5ojm+7rFWW93EMxsyXSz4aDtMNiDT2tPIPPatc=
+github.com/fido-device-onboard/go-fdo/fsim v0.0.0-20241004025821-5b174bc99e6f h1:qZE4m73shr/Qtoo/CyJBqspwrVX2adzw5C4O75DFh4k=
+github.com/fido-device-onboard/go-fdo/fsim v0.0.0-20241004025821-5b174bc99e6f/go.mod h1:OlL5PQ2GtOUf05qzWFj9cCCCS9rR2hFAvYGvseabOTI=
+github.com/fido-device-onboard/go-fdo/tpm v0.0.0-20241004025821-5b174bc99e6f h1:yr6+put9bsPTYWCdHJHT9ZYOWj/ct4W6UiSYX2B32Fk=
+github.com/fido-device-onboard/go-fdo/tpm v0.0.0-20241004025821-5b174bc99e6f/go.mod h1:QlydXodpweEzudtPeddLBPf/LDnHsM1N/1fu3gOwAI0=
 github.com/golang/protobuf v1.5.3 h1:KhyjKVUg7Usr/dYsdSqoFveMYd5ko72D+zANwlG1mmg=
 github.com/golang/protobuf v1.5.3/go.mod h1:XVQd3VNwM+JqD3oG2Ue2ip4fOMUkwXdXDdiuN0vRsmY=
 github.com/google/go-configfs-tsm v0.3.2 h1:ZYmHkdQavfsvVGDtX7RRda0gamelUNUhu0A9fbiuLmE=

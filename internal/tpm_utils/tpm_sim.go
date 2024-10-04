@@ -3,7 +3,7 @@
 
 //go:build tpmsim
 
-package main
+package tpm_utils
 
 import (
 	"io"
@@ -14,7 +14,7 @@ import (
 	"github.com/fido-device-onboard/go-fdo/tpm"
 )
 
-func tpmOpen(tpmPath string) (tpm.Closer, error) {
+func TpmOpen(tpmPath string) (tpm.Closer, error) {
 	if tpmPath == "simulator" {
 		sim, err := simulator.GetWithFixedSeedInsecure(8086)
 		if err != nil {

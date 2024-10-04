@@ -31,6 +31,8 @@ import (
 	"time"
 
 	"github.com/fido-device-onboard/go-fdo"
+	"github.com/fido-device-onboard/go-fdo-client/internal/tls"
+	"github.com/fido-device-onboard/go-fdo-client/internal/tpm_utils"
 	"github.com/fido-device-onboard/go-fdo/blob"
 	"github.com/fido-device-onboard/go-fdo/cbor"
 	"github.com/fido-device-onboard/go-fdo/cose"
@@ -59,6 +61,8 @@ var (
 	echoCmds    bool
 	uploads     = make(fsVar)
 	wgetDir     string
+	insecureTLS bool
+	tpmc        tpm.Closer
 )
 
 type fsVar map[string]string
@@ -174,6 +178,15 @@ func client() error {
 		}
 	}()
 
+	if tpmPath != "" {
+		var err error
+		tpmc, err = tpm_utils.TpmOpen(tpmPath)
+		if err != nil {
+			return err
+		}
+		defer tpmc.Close()
+	}
+
 	// Perform DI if given a URL
 	if diURL != "" {
 		return di()
@@ -206,17 +219,20 @@ func client() error {
 			FileSep: ";",
 			Bin:     runtime.GOARCH,
 		},
-		KeyExchange: kex.Suite(kexSuite),
-		CipherSuite: kexCipherSuiteID,
+		KeyExchange:          kex.Suite(kexSuite),
+		CipherSuite:          kexCipherSuiteID,
+		AllowCredentialReuse: true,
 	})
 	if rvOnly {
 		return nil
 	}
 	if newDC == nil {
-		return fmt.Errorf("transfer of ownership not successful")
+		fmt.Println("Credential not updated (either due to failure of TO2 or the Credential Reuse Protocol")
+		return nil
 	}
 
 	// Store new credential
+	fmt.Println("FIDO Device Onboard Complete")
 	return updateCred(*newDC)
 }
 
@@ -288,7 +304,7 @@ func di() (err error) { //nolint:gocyclo
 	default:
 		return fmt.Errorf("unsupported key encoding: %s", diKeyEnc)
 	}
-	cred, err := fdo.DI(context.TODO(), tlsTransport(diURL, nil), custom.DeviceMfgInfo{
+	cred, err := fdo.DI(context.TODO(), tls.TlsTransport(diURL, nil, insecureTLS), custom.DeviceMfgInfo{
 		KeyType:      keyType,
 		KeyEncoding:  keyEncoding,
 		SerialNumber: strconv.FormatInt(sn.Int64(), 10),
@@ -304,7 +320,7 @@ func di() (err error) { //nolint:gocyclo
 	}
 
 	if tpmPath != "" {
-		return saveCred(tpm.DeviceCredential{
+		return saveTpmCred(tpm.DeviceCredential{
 			DeviceCredential: *cred,
 			DeviceKey:        tpm.FdoDeviceKey,
 		})
@@ -339,7 +355,7 @@ TO1:
 
 		for _, url := range directive.URLs {
 			var err error
-			to1d, err = fdo.TO1(context.TODO(), tlsTransport(url.String(), nil), conf.Cred, conf.Key, nil)
+			to1d, err = fdo.TO1(context.TODO(), tls.TlsTransport(url.String(), nil, insecureTLS), conf.Cred, conf.Key, nil)
 			if err != nil {
 				slog.Error("TO1 failed", "base URL", url.String(), "error", err)
 				continue
@@ -400,7 +416,7 @@ TO1:
 
 	// Try TO2 on each address only once
 	for _, baseURL := range to2URLs {
-		newDC := transferOwnership2(tlsTransport(baseURL, nil), to1d, conf)
+		newDC := transferOwnership2(tls.TlsTransport(baseURL, nil, insecureTLS), to1d, conf)
 		if newDC != nil {
 			return newDC
 		}

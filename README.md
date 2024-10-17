@@ -6,12 +6,25 @@
 [cbor]: https://www.rfc-editor.org/rfc/rfc8949.html
 [cose]: https://datatracker.ietf.org/doc/html/rfc8152
 
+## Prerequisites
+
+- Go 1.23.0 or later
+- A Go module initialized with `go mod init`
+
+
+The `update-deps.sh` script updates all dependencies in your Go module to their latest versions and cleans up the `go.mod` and `go.sum` files.
+
+To update your dependencies, simply run the script:
+```sh
+./update-deps.sh
+```
+
 ## Building the Client Application
 
 The client application can be built with `make build` or `go build` directly,
 
 ```console
-$ make build or go build -o fdo_client ./cmd
+$ make build or go build -o fdo_client ./cmd/fdo_client
 $ ./fdo_client
 
 Usage:
@@ -89,4 +102,35 @@ The TPM simulator may be used with 3 caveats:
 1. RSA3072 keys are not supported
 2. OpenSSL libraries and headers must be installed
 3. The `tpmsim` build tag must be used
+```
+
+## Running the FDO Client
+### Remove Credential File
+Remove the credential file if it exists:
+```
+rm cred.bin
+```
+### Run the FDO Client with DI URL
+Run the FDO client, specifying the DI URL:
+```
+./fdo_client -di http://127.0.0.1:8038 -debug
+```
+### Print FDO Client Configuration or Status
+Print the FDO client configuration or status:
+```
+./fdo_client -print
+```
+
+## Execute TO0 from FDO Go Server
+TO0 will be completed in the respective Owner and RV.
+
+## Optional: Run the FDO Client in RV-Only Mode
+Run the FDO client in RV-only mode:
+```
+./fdo_client -rv-only -debug
+```
+### Run the FDO Client for End-to-End (E2E) Testing
+Run the FDO client for E2E testing:
+```
+./fdo_client -debug
 ```

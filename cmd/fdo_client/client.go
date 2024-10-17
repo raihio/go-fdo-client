@@ -45,20 +45,21 @@ import (
 var clientFlags = flag.NewFlagSet("client", flag.ContinueOnError)
 
 var (
-	debug       bool
-	blobPath    string
-	diURL       string
-	diKey       string
-	diKeyEnc    string
-	kexSuite    string
-	cipherSuite string
-	tpmPath     string
-	printDevice bool
-	rvOnly      bool
-	dlDir       string
-	echoCmds    bool
-	uploads     = make(fsVar)
-	wgetDir     string
+	debug        bool
+	blobPath     string
+	diURL        string
+	diKey        string
+	diKeyEnc     string
+	kexSuite     string
+	cipherSuite  string
+	tpmPath      string
+	printDevice  bool
+	rvOnly       bool
+	dlDir        string
+	echoCmds     bool
+	uploads      = make(fsVar)
+	wgetDir      string
+	deviceStatus FdoDeviceState
 )
 
 type fsVar map[string]string
@@ -140,7 +141,7 @@ func init() {
 	clientFlags.StringVar(&cipherSuite, "cipher", "A128GCM", "Name of cipher `suite` to use for encryption (see usage)")
 	clientFlags.BoolVar(&debug, "debug", debug, "Print HTTP contents")
 	clientFlags.StringVar(&dlDir, "download", "", "A `dir` to download files into (FSIM disabled if empty)")
-	clientFlags.StringVar(&diURL, "di", "", "HTTP base `URL` for DI server")
+	clientFlags.StringVar(&diURL, "di", "http://127.0.0.1:8080", "HTTP base `URL` for DI server")
 	clientFlags.StringVar(&diKey, "di-key", "ec384", "Key for device credential [options: ec256, ec384, rsa2048, rsa3072]")
 	clientFlags.StringVar(&diKeyEnc, "di-key-enc", "x509", "Public key encoding to use for manufacturer key [x509,x5chain,cose]")
 	clientFlags.BoolVar(&echoCmds, "echo-commands", false, "Echo all commands received to stdout (FSIM disabled if false)")
@@ -174,50 +175,81 @@ func client() error {
 		}
 	}()
 
-	// Perform DI if given a URL
-	if diURL != "" {
-		return di()
+	deviceStatus = FDO_STATE_PC
+
+	if !loadDeviceStatus(&deviceStatus) {
+		return fmt.Errorf("load device status failed")
 	}
 
-	// Read device credential blob to configure client for TO1/TO2
-	dc, hmacSha256, hmacSha384, privateKey, cleanup, err := readCred()
-	if err == nil && cleanup != nil {
-		defer func() { _ = cleanup() }()
-	}
-	if err != nil || printDevice {
-		return err
+	if deviceStatus == FDO_STATE_PC {
+		if tpmPath != "" {
+			var dc fdoTpmDeviceCredential
+			if err := readCredFile(&dc); err != nil {
+				return err
+			}
+			deviceStatus = dc.State
+		} else {
+			var dc fdoDeviceCredential
+			if err := readCredFile(&dc); err != nil {
+				return err
+			}
+			deviceStatus = dc.State
+		}
 	}
 
-	// Try TO1+TO2
-	kexCipherSuiteID, ok := kex.CipherSuiteByName(cipherSuite)
-	if !ok {
-		return fmt.Errorf("invalid key exchange cipher suite: %s", cipherSuite)
-	}
-	newDC := transferOwnership(ctx, dc.RvInfo, fdo.TO2Config{
-		Cred:       *dc,
-		HmacSha256: hmacSha256,
-		HmacSha384: hmacSha384,
-		Key:        privateKey,
-		Devmod: serviceinfo.Devmod{
-			Os:      runtime.GOOS,
-			Arch:    runtime.GOARCH,
-			Version: "Debian Bookworm",
-			Device:  "go-validation",
-			FileSep: ";",
-			Bin:     runtime.GOARCH,
-		},
-		KeyExchange: kex.Suite(kexSuite),
-		CipherSuite: kexCipherSuiteID,
-	})
-	if rvOnly {
+	printDeviceStatus(deviceStatus)
+
+	if deviceStatus == FDO_STATE_IDLE {
+		slog.Debug("FDO in Idle State. Device Onboarding already complete\n")
 		return nil
-	}
-	if newDC == nil {
-		return fmt.Errorf("transfer of ownership not successful")
+	} else if deviceStatus == FDO_STATE_PRE_DI {
+		return di()
+	} else if deviceStatus == FDO_STATE_PRE_TO1 {
+
+		// Read device credential blob to configure client for TO1/TO2
+		dc, hmacSha256, hmacSha384, privateKey, cleanup, err := readCred()
+		if err == nil && cleanup != nil {
+			defer func() { _ = cleanup() }()
+		}
+		if err != nil || printDevice {
+			return err
+		}
+
+		// Try TO1+TO2
+		kexCipherSuiteID, ok := kex.CipherSuiteByName(cipherSuite)
+		if !ok {
+			return fmt.Errorf("invalid key exchange cipher suite: %s", cipherSuite)
+		}
+		newDC := transferOwnership(ctx, dc.RvInfo, fdo.TO2Config{
+			Cred:       *dc,
+			HmacSha256: hmacSha256,
+			HmacSha384: hmacSha384,
+			Key:        privateKey,
+			Devmod: serviceinfo.Devmod{
+				Os:      runtime.GOOS,
+				Arch:    runtime.GOARCH,
+				Version: "Debian Bookworm",
+				Device:  "go-validation",
+				FileSep: ";",
+				Bin:     runtime.GOARCH,
+			},
+			KeyExchange:          kex.Suite(kexSuite),
+			CipherSuite:          kexCipherSuiteID,
+			AllowCredentialReuse: true,
+		})
+		if rvOnly {
+			return nil
+		}
+		if newDC == nil {
+			fmt.Println("Credential not updated (either due to failure of TO2 or the Credential Reuse Protocol")
+			return nil
+		}
+
+		// Store new credential
+		return updateCred(*newDC, FDO_STATE_IDLE)
 	}
 
-	// Store new credential
-	return updateCred(*newDC)
+	return fmt.Errorf("invalid state")
 }
 
 func di() (err error) { //nolint:gocyclo
@@ -228,6 +260,7 @@ func di() (err error) { //nolint:gocyclo
 	}
 	hmacSha256, hmacSha384 := hmac.New(sha256.New, secret), hmac.New(sha512.New384, secret)
 
+	var sigAlg x509.SignatureAlgorithm
 	var keyType protocol.KeyType
 	var key crypto.Signer
 	switch diKey {
@@ -241,6 +274,7 @@ func di() (err error) { //nolint:gocyclo
 		keyType = protocol.Rsa2048RestrKeyType
 		key, err = rsa.GenerateKey(rand.Reader, 2048)
 	case "rsa3072":
+		sigAlg = x509.SHA384WithRSA
 		keyType = protocol.RsaPkcsKeyType
 		key, err = rsa.GenerateKey(rand.Reader, 3072)
 	default:
@@ -262,7 +296,8 @@ func di() (err error) { //nolint:gocyclo
 
 	// Generate Java implementation-compatible mfg string
 	csrDER, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
-		Subject: pkix.Name{CommonName: "device.go-fdo"},
+		Subject:            pkix.Name{CommonName: "device.go-fdo"},
+		SignatureAlgorithm: sigAlg,
 	}, key)
 	if err != nil {
 		return fmt.Errorf("error creating CSR for device certificate chain: %w", err)
@@ -304,16 +339,22 @@ func di() (err error) { //nolint:gocyclo
 	}
 
 	if tpmPath != "" {
-		return saveCred(tpm.DeviceCredential{
-			DeviceCredential: *cred,
-			DeviceKey:        tpm.FdoDeviceKey,
+		return saveCred(fdoTpmDeviceCredential{
+			tpm.DeviceCredential{
+				DeviceCredential: *cred,
+				DeviceKey:        tpm.FdoDeviceKey,
+			},
+			FDO_STATE_PRE_TO1,
 		})
 	}
-	return saveCred(blob.DeviceCredential{
-		Active:           true,
-		DeviceCredential: *cred,
-		HmacSecret:       secret,
-		PrivateKey:       blob.Pkcs8Key{Signer: key},
+	return saveCred(fdoDeviceCredential{
+		blob.DeviceCredential{
+			Active:           true,
+			DeviceCredential: *cred,
+			HmacSecret:       secret,
+			PrivateKey:       blob.Pkcs8Key{Signer: key},
+		},
+		FDO_STATE_PRE_TO1,
 	})
 }
 
@@ -475,4 +516,20 @@ func isValidIP(ip string) bool {
 func isResolvableDNS(dns string) bool {
 	_, err := net.LookupHost(dns)
 	return err == nil
+}
+
+func printDeviceStatus(status FdoDeviceState) {
+
+	switch status {
+	case FDO_STATE_PRE_DI:
+		slog.Debug("Device is ready for DI")
+	case FDO_STATE_PRE_TO1:
+		slog.Debug("Device is ready for Ownership transfer")
+	case FDO_STATE_IDLE:
+		slog.Debug("Device Ownership transfer Done")
+	case FDO_STATE_RESALE:
+		slog.Debug("Device is ready for Ownership transfer")
+	case FDO_STATE_ERROR:
+		slog.Debug("Error in getting device status")
+	}
 }

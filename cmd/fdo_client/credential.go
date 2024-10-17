@@ -12,6 +12,7 @@ import (
 	"flag"
 	"fmt"
 	"hash"
+	"log/slog"
 	"os"
 	"path/filepath"
 
@@ -20,6 +21,28 @@ import (
 	"github.com/fido-device-onboard/go-fdo/cbor"
 	"github.com/fido-device-onboard/go-fdo/tpm"
 )
+
+// FDO Device State
+type FdoDeviceState int
+
+const (
+	FDO_STATE_PC FdoDeviceState = iota
+	FDO_STATE_PRE_DI
+	FDO_STATE_PRE_TO1
+	FDO_STATE_IDLE
+	FDO_STATE_RESALE
+	FDO_STATE_ERROR
+)
+
+type fdoDeviceCredential struct {
+	DC    blob.DeviceCredential
+	State FdoDeviceState
+}
+
+type fdoTpmDeviceCredential struct {
+	DC    tpm.DeviceCredential
+	State FdoDeviceState
+}
 
 func tpmCred() (hash.Hash, hash.Hash, crypto.Signer, func() error, error) {
 	var diKeyFlagSet bool
@@ -81,7 +104,7 @@ func readCred() (_ *fdo.DeviceCredential, hmacSha256, hmacSha384 hash.Hash, key 
 		// DeviceCredential requires integrity, so it is stored as a file and
 		// expected to be protected. In the future, it should be stored in the
 		// TPM and access-protected with a policy.
-		var dc tpm.DeviceCredential
+		var dc fdoTpmDeviceCredential
 		if err := readCredFile(&dc); err != nil {
 			return nil, nil, nil, nil, nil, err
 		}
@@ -90,19 +113,45 @@ func readCred() (_ *fdo.DeviceCredential, hmacSha256, hmacSha384 hash.Hash, key 
 		if err != nil {
 			return nil, nil, nil, nil, nil, err
 		}
-		return &dc.DeviceCredential, hmacSha256, hmacSha384, key, cleanup, nil
+		return &dc.DC.DeviceCredential, hmacSha256, hmacSha384, key, cleanup, nil
 	}
 
-	var dc blob.DeviceCredential
+	var dc fdoDeviceCredential
 	if err := readCredFile(&dc); err != nil {
 		return nil, nil, nil, nil, nil, err
 	}
-	return &dc.DeviceCredential,
-		hmac.New(sha256.New, dc.HmacSecret),
-		hmac.New(sha512.New384, dc.HmacSecret),
-		dc.PrivateKey,
+	return &dc.DC.DeviceCredential,
+		hmac.New(sha256.New, dc.DC.HmacSecret),
+		hmac.New(sha512.New384, dc.DC.HmacSecret),
+		&dc.DC.PrivateKey,
 		nil,
 		nil
+}
+
+func loadDeviceStatus(state *FdoDeviceState) bool {
+	if state == nil {
+		return false
+	}
+
+	blobData, err := os.ReadFile(filepath.Clean(blobPath))
+	if err != nil {
+		if os.IsNotExist(err) {
+			slog.Debug("DeviceCredential file does not exist. Set state to run DI")
+			*state = FDO_STATE_PRE_DI
+			return true // Return true if the file does not exist
+		}
+		slog.Error("error reading blob credential %q: %v", blobPath, err)
+		return false
+	}
+
+	if len(blobData) == 0 {
+		slog.Debug("DeviceCredential is empty. Set state to run DI")
+		*state = FDO_STATE_PRE_DI
+	} else {
+		slog.Debug("DeviceCredential is non-empty. Set state to run TO1/TO2")
+		// No Device state is being set currently
+	}
+	return true
 }
 
 func readCredFile(v any) error {
@@ -119,21 +168,23 @@ func readCredFile(v any) error {
 	return nil
 }
 
-func updateCred(newDC fdo.DeviceCredential) error {
+func updateCred(newDC fdo.DeviceCredential, state FdoDeviceState) error {
 	if tpmPath != "" {
-		var dc tpm.DeviceCredential
+		var dc fdoTpmDeviceCredential
 		if err := readCredFile(&dc); err != nil {
 			return err
 		}
-		dc.DeviceCredential = newDC
+		dc.DC.DeviceCredential = newDC
+		dc.State = state
 		return saveCred(dc)
 	}
 
-	var dc blob.DeviceCredential
+	var dc fdoDeviceCredential
 	if err := readCredFile(&dc); err != nil {
 		return err
 	}
-	dc.DeviceCredential = newDC
+	dc.DC.DeviceCredential = newDC
+	dc.State = state
 	return saveCred(dc)
 }
 

@@ -60,7 +60,7 @@ func validateFlags() error {
 		return fmt.Errorf("invalid cipher suite: %s", cipherSuite)
 	}
 
-	if dlDir != "" && !isValidPath(dlDir) {
+	if dlDir != "" && (!isValidPath(dlDir) || !fileExists(dlDir)) {
 		return fmt.Errorf("invalid download directory: %s", dlDir)
 	}
 
@@ -104,9 +104,13 @@ func validateFlags() error {
 		if !isValidPath(path) {
 			return fmt.Errorf("invalid upload path: %s", path)
 		}
+
+		if !fileExists(path) {
+			return fmt.Errorf("file doesn't exist: %s", path)
+		}
 	}
 
-	if wgetDir != "" && !isValidPath(wgetDir) {
+	if wgetDir != "" && (!isValidPath(wgetDir) || !fileExists(wgetDir)) {
 		return fmt.Errorf("invalid wget directory: %s", wgetDir)
 	}
 
@@ -119,6 +123,11 @@ func isValidPath(p string) bool {
 	}
 	absPath, err := filepath.Abs(p)
 	return err == nil && absPath != ""
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil || !os.IsNotExist(err)
 }
 
 func contains(slice []string, item string) bool {

@@ -134,3 +134,14 @@ Run the FDO client for E2E testing:
 ```
 ./fdo_client -debug
 ```
+## Clear TPM NV Index to Delete Existing Credential
+
+Ensure `tpm2_tools` is installed on your system.
+
+**Clear TPM NV Index**
+
+   Use the following command to clear the TPM NV index:
+
+   ```sh
+   sudo tpm2_nvundefine 0x01D10001
+   ```

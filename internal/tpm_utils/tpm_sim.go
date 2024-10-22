@@ -6,7 +6,9 @@
 package tpm_utils
 
 import (
+	"fmt"
 	"io"
+	"slices"
 
 	"github.com/google/go-tpm-tools/simulator"
 	"github.com/google/go-tpm/tpmutil"
@@ -14,15 +16,21 @@ import (
 	"github.com/fido-device-onboard/go-fdo/tpm"
 )
 
+var TPMDEVICES = []string{"/dev/tpm0", "/dev/tpmrm0"}
+
 func TpmOpen(tpmPath string) (tpm.Closer, error) {
 	if tpmPath == "simulator" {
-		sim, err := simulator.GetWithFixedSeedInsecure(8086)
+		sim, err := simulator.GetWithFixedSeedInsecure(1073741825)
 		if err != nil {
 			return nil, err
 		}
 		return &TPM{transport: sim}, nil
 	}
-	return tpm.Open(tpmPath)
+	if slices.Contains(TPMDEVICES, tpmPath) {
+		return tpm.Open(tpmPath)
+	}
+
+	return nil, fmt.Errorf("invalid tpm path")
 }
 
 // TPM represents a connection to a TPM simulator.

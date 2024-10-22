@@ -7,13 +7,21 @@ package tpm_utils
 
 import (
 	"fmt"
+	"slices"
 
 	"github.com/fido-device-onboard/go-fdo/tpm"
 )
+
+var TPMDEVICES = []string{"/dev/tpm0", "/dev/tpmrm0"}
 
 func TpmOpen(tpmPath string) (tpm.Closer, error) {
 	if tpmPath == "simulator" {
 		return nil, fmt.Errorf("tpm simulator support requires a build with the tpmsim tag")
 	}
-	return tpm.Open(tpmPath)
+
+	if slices.Contains(TPMDEVICES, tpmPath) {
+		return tpm.Open(tpmPath)
+	}
+
+	return nil, fmt.Errorf("invalid tpm path")
 }

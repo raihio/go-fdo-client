@@ -177,7 +177,7 @@ func client() error {
 
 	deviceStatus = FDO_STATE_PC
 
-	if !loadDeviceStatus(&deviceStatus) {
+	if !printDevice && !loadDeviceStatus(&deviceStatus) {
 		return fmt.Errorf("load device status failed")
 	}
 
@@ -195,6 +195,10 @@ func client() error {
 			}
 			deviceStatus = dc.State
 		}
+	}
+
+	if printDevice {
+		return nil
 	}
 
 	printDeviceStatus(deviceStatus)

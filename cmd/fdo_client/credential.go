@@ -47,6 +47,10 @@ type fdoTpmDeviceCredential struct {
 func tpmCred() (hash.Hash, hash.Hash, crypto.Signer, func() error, error) {
 	var diKeyFlagSet bool
 	clientFlags.Visit(func(flag *flag.Flag) {
+		if flag == nil {
+			slog.Error("Unexpected nil flag encountered")
+			return
+		}
 		diKeyFlagSet = diKeyFlagSet || flag.Name == "di-key"
 	})
 	if !diKeyFlagSet {
@@ -79,12 +83,12 @@ func tpmCred() (hash.Hash, hash.Hash, crypto.Signer, func() error, error) {
 		key, err = tpm.GenerateRSAKey(tpmc, 2048)
 	case "rsa3072":
 		if tpmPath == "simulator" {
-			err = fmt.Errorf("TPM simulator does not support RSA3072")
+			err = fmt.Errorf("TPM simulator does not support this key type")
 		} else {
 			key, err = tpm.GenerateRSAKey(tpmc, 3072)
 		}
 	default:
-		err = fmt.Errorf("unsupported key type: %s", diKey)
+		err = fmt.Errorf("unsupported key type")
 	}
 	if err != nil {
 		_ = tpmc.Close()
@@ -200,8 +204,12 @@ func saveCred(dc any) error {
 		return err
 	}
 
+	// Ensure the temp file is closed before renaming
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("error closing temp file: %w", err)
+	}
+
 	// Rename temp file to given blob path
-	_ = tmp.Close()
 	if err := os.Rename(tmp.Name(), blobPath); err != nil {
 		return fmt.Errorf("error renaming temp blob credential to %q: %w", blobPath, err)
 	}

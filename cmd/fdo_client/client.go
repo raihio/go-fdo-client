@@ -347,7 +347,7 @@ func di() (err error) { //nolint:gocyclo
 			FDO_STATE_PRE_TO1,
 		})
 	}
-	return saveCred(fdoDeviceCredential{
+	err = saveCred(fdoDeviceCredential{
 		blob.DeviceCredential{
 			Active:           true,
 			DeviceCredential: *cred,
@@ -356,6 +356,15 @@ func di() (err error) { //nolint:gocyclo
 		},
 		FDO_STATE_PRE_TO1,
 	})
+
+	// Securely erase the secret and HMAC objects from memory
+	for i := range secret {
+		secret[i] = 0
+	}
+	hmacSha256.Reset()
+	hmacSha384.Reset()
+
+	return err
 }
 
 func transferOwnership(ctx context.Context, rvInfo [][]protocol.RvInstruction, conf fdo.TO2Config) *fdo.DeviceCredential { //nolint:gocyclo
@@ -457,14 +466,18 @@ func transferOwnership2(transport fdo.Transport, to1d *cose.Sign1[protocol.To1d,
 	if dlDir != "" {
 		fsims["fdo.download"] = &fsim.Download{
 			CreateTemp: func() (*os.File, error) {
-				return os.CreateTemp(dlDir, ".fdo.download_*")
+				tmpFile, err := os.CreateTemp(dlDir, ".fdo.download_*")
+				if err != nil {
+					return nil, err
+				}
+				return tmpFile, nil
 			},
 			NameToPath: func(name string) string {
-				// If the path tries to escape the directory, just use the file name
-				if !filepath.IsLocal(name) {
-					name = filepath.Base(name)
+				cleanName := filepath.Clean(name)
+				if !filepath.IsAbs(cleanName) {
+					return filepath.Join(dlDir, cleanName)
 				}
-				return filepath.Join(dlDir, filepath.Clean(name))
+				return filepath.Join(dlDir, filepath.Base(cleanName))
 			},
 		}
 	}
@@ -472,8 +485,11 @@ func transferOwnership2(transport fdo.Transport, to1d *cose.Sign1[protocol.To1d,
 		fsims["fdo.command"] = &fsim.Command{
 			Timeout: time.Second,
 			Transform: func(cmd string, args []string) (string, []string) {
-				return "sh", []string{"-c",
-					fmt.Sprintf("echo %q", strings.Join(args, " "))}
+				sanitizedArgs := make([]string, len(args))
+				for i, arg := range args {
+					sanitizedArgs[i] = fmt.Sprintf("%q", arg)
+				}
+				return "sh", []string{"-c", fmt.Sprintf("echo %s", strings.Join(sanitizedArgs, " "))}
 			},
 		}
 	}
@@ -485,14 +501,18 @@ func transferOwnership2(transport fdo.Transport, to1d *cose.Sign1[protocol.To1d,
 	if wgetDir != "" {
 		fsims["fdo.wget"] = &fsim.Wget{
 			CreateTemp: func() (*os.File, error) {
-				return os.CreateTemp(wgetDir, ".fdo.wget_*")
+				tmpFile, err := os.CreateTemp(wgetDir, ".fdo.wget_*")
+				if err != nil {
+					return nil, err
+				}
+				return tmpFile, nil
 			},
 			NameToPath: func(name string) string {
-				// If the path tries to escape the directory, just use the file name
-				if !filepath.IsLocal(name) {
-					name = filepath.Base(name)
+				cleanName := filepath.Clean(name)
+				if !filepath.IsAbs(cleanName) {
+					return filepath.Join(wgetDir, cleanName)
 				}
-				return filepath.Join(wgetDir, filepath.Clean(name))
+				return filepath.Join(wgetDir, filepath.Base(cleanName))
 			},
 			Timeout: 10 * time.Second,
 		}

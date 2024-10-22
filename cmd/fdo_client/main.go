@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -96,7 +97,8 @@ func validateFlags() error {
 		return fmt.Errorf("invalid key exchange suite: %s", kexSuite)
 	}
 
-	if tpmPath != "" && !isValidPath(tpmPath) {
+	TPMDEVICES := []string{"/dev/tpm0", "/dev/tpmrm0", "simulator"}
+	if tpmPath != "" && !slices.Contains(TPMDEVICES, tpmPath) {
 		return fmt.Errorf("invalid TPM path: %s", tpmPath)
 	}
 

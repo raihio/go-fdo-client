@@ -113,7 +113,7 @@ rm cred.bin
 ### Run the FDO Client with DI URL
 Run the FDO client, specifying the DI URL:
 ```
-./fdo_client -di http://127.0.0.1:8038 -debug
+./fdo_client -di http://127.0.0.1:8080 -debug
 ```
 ### Print FDO Client Configuration or Status
 Print the FDO client configuration or status:
@@ -134,7 +134,9 @@ Run the FDO client for E2E testing:
 ```
 ./fdo_client -debug
 ```
-## Clear TPM NV Index to Delete Existing Credential
+
+## Running the FDO Client with TPM
+### Clear TPM NV Index to Delete Existing Credential
 
 Ensure `tpm2_tools` is installed on your system.
 
@@ -145,3 +147,30 @@ Ensure `tpm2_tools` is installed on your system.
    ```sh
    sudo tpm2_nvundefine 0x01D10001
    ```
+### Run the FDO Client with DI URL
+Run the FDO client, specifying the DI URL with the TPM resource manager path specified.
+The suppoerted key type and key exchange must always be explicit through the -di-key and -kex flag.:
+```
+./fdo_client -di http://127.0.0.1:8080 -di-key ec256 -kex ECDH256 -tpm /dev/tpmrm0 -debug
+```
+>NOTE: fdo_client may require elevated privileges. Please use 'sudo' to execute.
+### Print FDO Client Configuration or Status
+Print the FDO client configuration or status:
+```
+./fdo_client -tpm /dev/tpmrm0  -print
+```
+
+## Execute TO0 from FDO Go Server
+TO0 will be completed in the respective Owner and RV.
+
+## Optional: Run the FDO Client in RV-Only Mode
+Run the FDO client in RV-only mode:
+```
+./fdo_client -rv-only -di-key ec256 -kex ECDH256 -tpm /dev/tpmrm0  -debug
+```
+### Run the FDO Client for End-to-End (E2E) Testing
+Run the FDO client for E2E testing:
+```
+./fdo_client -di-key ec256 -kex ECDH256 -tpm /dev/tpmrm0  -debug
+```
+

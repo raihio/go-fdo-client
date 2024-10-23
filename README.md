@@ -1,6 +1,6 @@
 # FIDO Device Onboard - Go Client
 
-`go-fdo-client` is a client implementation of FIDO Device Onboard specification in Go.
+`go-fdo-client` is a client implementation of FIDO Device Onboard specification in Go using [FDO GO protocols.](https://github.com/fido-device-onboard/go-fdo)
 
 [fdo]: https://fidoalliance.org/specs/FDO/FIDO-Device-Onboard-PS-v1.1-20220419/FIDO-Device-Onboard-PS-v1.1-20220419.html
 [cbor]: https://www.rfc-editor.org/rfc/rfc8949.html
@@ -87,21 +87,6 @@ Key exchange suites:
   - ASYMKEX3072
   - ECDH256
   - ECDH384
-```
-
-## Building the Client Application with TPM Simulator
-To build the client application with the tpmsim tag, you can use make build-tpmsim or go build wit-tags option:
-```console
-$ make build-tpmsim
-# or
-$ go build -tags tpmsim -o fdo_client ./cmd/fdo_client/
-$ ./fdo_client -tpm simulator
-
-The TPM simulator may be used with 3 caveats:
-
-1. RSA3072 keys are not supported
-2. OpenSSL libraries and headers must be installed
-3. The `tpmsim` build tag must be used
 ```
 
 ## Running the FDO Client

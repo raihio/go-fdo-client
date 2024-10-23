@@ -78,11 +78,7 @@ func tpmCred() (hash.Hash, hash.Hash, crypto.Signer, func() error, error) {
 	case "rsa2048":
 		key, err = tpm.GenerateRSAKey(tpmc, 2048)
 	case "rsa3072":
-		if tpmPath == "simulator" {
-			err = fmt.Errorf("TPM simulator does not support RSA3072")
-		} else {
-			key, err = tpm.GenerateRSAKey(tpmc, 3072)
-		}
+		key, err = tpm.GenerateRSAKey(tpmc, 3072)
 	default:
 		err = fmt.Errorf("unsupported key type: %s", diKey)
 	}

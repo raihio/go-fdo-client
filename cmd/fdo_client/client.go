@@ -64,6 +64,7 @@ var (
 	deviceStatus FdoDeviceState
 	insecureTLS  bool
 	tpmc         tpm.Closer
+	resale       bool
 )
 
 type fsVar map[string]string
@@ -153,6 +154,7 @@ func init() {
 	clientFlags.BoolVar(&insecureTLS, "insecure-tls", false, "Skip TLS certificate verification")
 	clientFlags.BoolVar(&printDevice, "print", false, "Print device credential blob and stop")
 	clientFlags.BoolVar(&rvOnly, "rv-only", false, "Perform TO1 then stop")
+	clientFlags.BoolVar(&resale, "resale", false, "Perform resale")
 	clientFlags.StringVar(&tpmPath, "tpm", "", "Use a TPM at `path` for device credential secrets")
 	clientFlags.Var(&uploads, "upload", "List of dirs and `files` to upload files from, "+
 		"comma-separated and/or flag provided multiple times (FSIM disabled if empty)")
@@ -221,7 +223,7 @@ func client() error {
 		return nil
 	} else if deviceStatus == FDO_STATE_PRE_DI {
 		return di()
-	} else if deviceStatus == FDO_STATE_PRE_TO1 {
+	} else if deviceStatus == FDO_STATE_PRE_TO1 || deviceStatus == FDO_STATE_RESALE {
 
 		// Read device credential blob to configure client for TO1/TO2
 		dc, hmacSha256, hmacSha384, privateKey, cleanup, err := readCred()

@@ -55,6 +55,8 @@ Client options:
         Print device credential blob and stop
   -rv-only
         Perform TO1 then stop
+  -resale
+        Perform resale
   -tpm path
         Use a TPM at path for device credential secrets
   -upload files

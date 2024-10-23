@@ -190,7 +190,7 @@ func client() error {
 
 	deviceStatus = FDO_STATE_PC
 
-	if !loadDeviceStatus(&deviceStatus) {
+	if !printDevice && !loadDeviceStatus(&deviceStatus) {
 		return fmt.Errorf("load device status failed")
 	}
 
@@ -208,6 +208,10 @@ func client() error {
 			}
 			deviceStatus = dc.State
 		}
+	}
+
+	if printDevice {
+		return nil
 	}
 
 	printDeviceStatus(deviceStatus)
@@ -486,7 +490,7 @@ func transferOwnership2(transport fdo.Transport, to1d *cose.Sign1[protocol.To1d,
 			Timeout: time.Second,
 			Transform: func(cmd string, args []string) (string, []string) {
 				return "sh", []string{"-c",
-					fmt.Sprintf("echo %q", strings.Join(args, " "))}
+					fmt.Sprintf("echo %q", strings.Join(append([]string{cmd}, args...), " "))}
 			},
 		}
 	}

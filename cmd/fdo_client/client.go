@@ -31,6 +31,8 @@ import (
 	"time"
 
 	"github.com/fido-device-onboard/go-fdo"
+	"github.com/fido-device-onboard/go-fdo-client/internal/tls"
+	"github.com/fido-device-onboard/go-fdo-client/internal/tpm_utils"
 	"github.com/fido-device-onboard/go-fdo/blob"
 	"github.com/fido-device-onboard/go-fdo/cbor"
 	"github.com/fido-device-onboard/go-fdo/cose"
@@ -60,6 +62,8 @@ var (
 	uploads      = make(fsVar)
 	wgetDir      string
 	deviceStatus FdoDeviceState
+	insecureTLS  bool
+	tpmc         tpm.Closer
 )
 
 type fsVar map[string]string
@@ -175,6 +179,15 @@ func client() error {
 		}
 	}()
 
+	if tpmPath != "" {
+		var err error
+		tpmc, err = tpm_utils.TpmOpen(tpmPath)
+		if err != nil {
+			return err
+		}
+		defer tpmc.Close()
+	}
+
 	deviceStatus = FDO_STATE_PC
 
 	if !loadDeviceStatus(&deviceStatus) {
@@ -184,7 +197,7 @@ func client() error {
 	if deviceStatus == FDO_STATE_PC {
 		if tpmPath != "" {
 			var dc fdoTpmDeviceCredential
-			if err := readCredFile(&dc); err != nil {
+			if err := readTpmCred(&dc); err != nil {
 				return err
 			}
 			deviceStatus = dc.State
@@ -246,9 +259,9 @@ func client() error {
 		}
 
 		// Store new credential
+		fmt.Println("FIDO Device Onboard Complete")
 		return updateCred(*newDC, FDO_STATE_IDLE)
 	}
-
 	return fmt.Errorf("invalid state")
 }
 
@@ -323,7 +336,7 @@ func di() (err error) { //nolint:gocyclo
 	default:
 		return fmt.Errorf("unsupported key encoding: %s", diKeyEnc)
 	}
-	cred, err := fdo.DI(context.TODO(), tlsTransport(diURL, nil), custom.DeviceMfgInfo{
+	cred, err := fdo.DI(context.TODO(), tls.TlsTransport(diURL, nil, insecureTLS), custom.DeviceMfgInfo{
 		KeyType:      keyType,
 		KeyEncoding:  keyEncoding,
 		SerialNumber: strconv.FormatInt(sn.Int64(), 10),
@@ -339,7 +352,7 @@ func di() (err error) { //nolint:gocyclo
 	}
 
 	if tpmPath != "" {
-		return saveCred(fdoTpmDeviceCredential{
+		return saveTpmCred(fdoTpmDeviceCredential{
 			tpm.DeviceCredential{
 				DeviceCredential: *cred,
 				DeviceKey:        tpm.FdoDeviceKey,
@@ -380,7 +393,7 @@ TO1:
 
 		for _, url := range directive.URLs {
 			var err error
-			to1d, err = fdo.TO1(context.TODO(), tlsTransport(url.String(), nil), conf.Cred, conf.Key, nil)
+			to1d, err = fdo.TO1(context.TODO(), tls.TlsTransport(url.String(), nil, insecureTLS), conf.Cred, conf.Key, nil)
 			if err != nil {
 				slog.Error("TO1 failed", "base URL", url.String(), "error", err)
 				continue
@@ -441,7 +454,7 @@ TO1:
 
 	// Try TO2 on each address only once
 	for _, baseURL := range to2URLs {
-		newDC := transferOwnership2(tlsTransport(baseURL, nil), to1d, conf)
+		newDC := transferOwnership2(tls.TlsTransport(baseURL, nil, insecureTLS), to1d, conf)
 		if newDC != nil {
 			return newDC
 		}
@@ -517,9 +530,7 @@ func isResolvableDNS(dns string) bool {
 	_, err := net.LookupHost(dns)
 	return err == nil
 }
-
 func printDeviceStatus(status FdoDeviceState) {
-
 	switch status {
 	case FDO_STATE_PRE_DI:
 		slog.Debug("Device is ready for DI")

@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto"
 	"crypto/elliptic"
 	"crypto/hmac"
@@ -17,10 +18,14 @@ import (
 	"path/filepath"
 
 	"github.com/fido-device-onboard/go-fdo"
+	tpmnv "github.com/fido-device-onboard/go-fdo-client/internal/tpm_utils"
 	"github.com/fido-device-onboard/go-fdo/blob"
 	"github.com/fido-device-onboard/go-fdo/cbor"
 	"github.com/fido-device-onboard/go-fdo/tpm"
+	"github.com/google/go-tpm/tpm2"
 )
+
+const FDO_CRED_NV_IDX = 0x01D10001
 
 // FDO Device State
 type FdoDeviceState int
@@ -53,11 +58,6 @@ func tpmCred() (hash.Hash, hash.Hash, crypto.Signer, func() error, error) {
 		return nil, nil, nil, nil, fmt.Errorf("-di-key must be set explicitly when using a TPM")
 	}
 
-	tpmc, err := tpmOpen(tpmPath)
-	if err != nil {
-		return nil, nil, nil, nil, err
-	}
-
 	// Use TPM keys for HMAC and Device Key
 	h256, err := tpm.NewHmac(tpmc, crypto.SHA256)
 	if err != nil {
@@ -78,11 +78,7 @@ func tpmCred() (hash.Hash, hash.Hash, crypto.Signer, func() error, error) {
 	case "rsa2048":
 		key, err = tpm.GenerateRSAKey(tpmc, 2048)
 	case "rsa3072":
-		if tpmPath == "simulator" {
-			err = fmt.Errorf("TPM simulator does not support RSA3072")
-		} else {
-			key, err = tpm.GenerateRSAKey(tpmc, 3072)
-		}
+		key, err = tpm.GenerateRSAKey(tpmc, 3072)
 	default:
 		err = fmt.Errorf("unsupported key type: %s", diKey)
 	}
@@ -95,7 +91,7 @@ func tpmCred() (hash.Hash, hash.Hash, crypto.Signer, func() error, error) {
 		_ = h256.Close()
 		_ = h384.Close()
 		_ = key.Close()
-		return tpmc.Close()
+		return nil
 	}, nil
 }
 
@@ -105,7 +101,7 @@ func readCred() (_ *fdo.DeviceCredential, hmacSha256, hmacSha384 hash.Hash, key 
 		// expected to be protected. In the future, it should be stored in the
 		// TPM and access-protected with a policy.
 		var dc fdoTpmDeviceCredential
-		if err := readCredFile(&dc); err != nil {
+		if err := readTpmCred(&dc); err != nil {
 			return nil, nil, nil, nil, nil, err
 		}
 
@@ -127,24 +123,29 @@ func readCred() (_ *fdo.DeviceCredential, hmacSha256, hmacSha384 hash.Hash, key 
 		nil,
 		nil
 }
-
 func loadDeviceStatus(state *FdoDeviceState) bool {
 	if state == nil {
 		return false
 	}
-
-	blobData, err := os.ReadFile(filepath.Clean(blobPath))
-	if err != nil {
-		if os.IsNotExist(err) {
-			slog.Debug("DeviceCredential file does not exist. Set state to run DI")
-			*state = FDO_STATE_PRE_DI
-			return true // Return true if the file does not exist
+	var dataSize int
+	if tpmPath != "" {
+		nv := tpm2.TPMHandle(FDO_CRED_NV_IDX)
+		dataSize = (int)(tpmnv.TpmNVGetSize(tpmc, nv))
+	} else {
+		blobData, err := os.ReadFile(filepath.Clean(blobPath))
+		if err != nil {
+			if os.IsNotExist(err) {
+				slog.Debug("DeviceCredential file does not exist. Set state to run DI")
+				*state = FDO_STATE_PRE_DI
+				return true // Return true if the file does not exist
+			}
+			slog.Error("error reading blob credential %q: %v", blobPath, err)
+			return false
 		}
-		slog.Error("error reading blob credential %q: %v", blobPath, err)
-		return false
+		dataSize = len(blobData)
 	}
 
-	if len(blobData) == 0 {
+	if dataSize == 0 {
 		slog.Debug("DeviceCredential is empty. Set state to run DI")
 		*state = FDO_STATE_PRE_DI
 	} else {
@@ -171,12 +172,12 @@ func readCredFile(v any) error {
 func updateCred(newDC fdo.DeviceCredential, state FdoDeviceState) error {
 	if tpmPath != "" {
 		var dc fdoTpmDeviceCredential
-		if err := readCredFile(&dc); err != nil {
+		if err := readTpmCred(&dc); err != nil {
 			return err
 		}
 		dc.DC.DeviceCredential = newDC
 		dc.State = state
-		return saveCred(dc)
+		return saveTpmCred(dc)
 	}
 
 	var dc fdoDeviceCredential
@@ -207,4 +208,62 @@ func saveCred(dc any) error {
 	}
 
 	return nil
+}
+
+// readTpmCred reads the stored credential from TPM NV memory.
+func readTpmCred(v any) error {
+	nv := tpm2.TPMHandle(FDO_CRED_NV_IDX)
+	// Read data from NV
+	data, err := tpmnv.TpmNVRead(tpmc, nv)
+	if err != nil {
+		return fmt.Errorf("failed to read from NV: %w", err)
+	}
+
+	// Decode CBOR data
+	if err := cbor.Unmarshal(data, v); err != nil {
+		return fmt.Errorf("error parsing credential: %w", err)
+	}
+
+	if printDevice {
+		fmt.Printf("%+v\n", v)
+	}
+	return nil
+}
+
+// saveTpmCred encodes the device credential to CBOR and writes it to TPM NV memory.
+func saveTpmCred(dc any) error {
+	nv := tpm2.TPMHandle(FDO_CRED_NV_IDX)
+	// Encode device credential to CBOR
+	var buf bytes.Buffer
+	if err := cbor.NewEncoder(&buf).Encode(dc); err != nil {
+		return fmt.Errorf("error encoding device credential to CBOR: %w", err)
+	}
+	data := buf.Bytes()
+
+	tpmHashAlg, err := getTPMAlgorithm(diKey)
+	if err != nil {
+		return err
+	}
+
+	// Write CBOR-encoded data to NV
+	if err := tpmnv.TpmNVWrite(tpmc, data, nv, tpmHashAlg); err != nil {
+		return fmt.Errorf("failed to write to NV: %w", err)
+	}
+
+	return nil
+}
+
+func getTPMAlgorithm(diKey string) (tpm2.TPMAlgID, error) {
+	switch diKey {
+	case "ec256":
+		return tpm2.TPMAlgSHA256, nil
+	case "ec384":
+		return tpm2.TPMAlgSHA384, nil
+	case "rsa2048":
+		return tpm2.TPMAlgSHA256, nil
+	case "rsa3072":
+		return tpm2.TPMAlgSHA384, nil
+	default:
+		return 0, fmt.Errorf("unsupported key type: %s", diKey)
+	}
 }

@@ -15,7 +15,7 @@ import (
 	"strings"
 )
 
-var flags = flag.NewFlagSet("root", flag.ContinueOnError)
+var flags = flag.NewFlagSet("main", flag.ContinueOnError)
 
 func main() {
 	if err := flags.Parse(os.Args); err != nil {

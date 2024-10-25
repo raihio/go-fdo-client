@@ -148,6 +148,9 @@ func loadDeviceStatus(state *FdoDeviceState) bool {
 	if dataSize == 0 {
 		slog.Debug("DeviceCredential is empty. Set state to run DI")
 		*state = FDO_STATE_PRE_DI
+	} else if resale {
+		*state = FDO_STATE_RESALE
+		slog.Debug("DeviceCredential is non-empty. Set state to resale")
 	} else {
 		slog.Debug("DeviceCredential is non-empty. Set state to run TO1/TO2")
 		// No Device state is being set currently

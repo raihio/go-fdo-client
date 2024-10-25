@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: (C) 2024 Intel Corporation
 // SPDX-License-Identifier: Apache 2.0
 
-package main
+package tls
 
 import (
 	"crypto/tls"
@@ -13,11 +13,16 @@ import (
 	"github.com/fido-device-onboard/go-fdo/http"
 )
 
-var insecureTLS bool
+func TlsTransport(baseURL string, conf *tls.Config, insecureTLS bool) fdo.Transport {
+	preferredCipherSuites := []uint16{
+		tls.TLS_AES_256_GCM_SHA384,                  // TLS v1.3
+		tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,   // TLS v1.2
+		tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384, // TLS v1.2
+	}
 
-func tlsTransport(baseURL string, conf *tls.Config) fdo.Transport {
 	if conf == nil {
 		conf = &tls.Config{
+			CipherSuites:       preferredCipherSuites,
 			InsecureSkipVerify: insecureTLS, //nolint:gosec
 		}
 	}

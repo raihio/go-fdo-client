@@ -1,6 +1,6 @@
 # FIDO Device Onboard - Go Client
 
-`go-fdo-client` is a client implementation of FIDO Device Onboard specification in Go.
+`go-fdo-client` is a client implementation of FIDO Device Onboard specification in Go using [FDO GO protocols.](https://github.com/fido-device-onboard/go-fdo)
 
 [fdo]: https://fidoalliance.org/specs/FDO/FIDO-Device-Onboard-PS-v1.1-20220419/FIDO-Device-Onboard-PS-v1.1-20220419.html
 [cbor]: https://www.rfc-editor.org/rfc/rfc8949.html
@@ -89,21 +89,6 @@ Key exchange suites:
   - ECDH384
 ```
 
-## Building the Client Application with TPM Simulator
-To build the client application with the tpmsim tag, you can use make build-tpmsim or go build wit-tags option:
-```console
-$ make build-tpmsim
-# or
-$ go build -tags tpmsim -o fdo_client ./cmd/fdo_client/
-$ ./fdo_client -tpm simulator
-
-The TPM simulator may be used with 3 caveats:
-
-1. RSA3072 keys are not supported
-2. OpenSSL libraries and headers must be installed
-3. The `tpmsim` build tag must be used
-```
-
 ## Running the FDO Client
 ### Remove Credential File
 Remove the credential file if it exists:
@@ -113,7 +98,7 @@ rm cred.bin
 ### Run the FDO Client with DI URL
 Run the FDO client, specifying the DI URL:
 ```
-./fdo_client -di http://127.0.0.1:8038 -debug
+./fdo_client -di http://127.0.0.1:8080 -debug
 ```
 ### Print FDO Client Configuration or Status
 Print the FDO client configuration or status:
@@ -134,3 +119,43 @@ Run the FDO client for E2E testing:
 ```
 ./fdo_client -debug
 ```
+
+## Running the FDO Client with TPM
+### Clear TPM NV Index to Delete Existing Credential
+
+Ensure `tpm2_tools` is installed on your system.
+
+**Clear TPM NV Index**
+
+   Use the following command to clear the TPM NV index:
+
+   ```sh
+   sudo tpm2_nvundefine 0x01D10001
+   ```
+### Run the FDO Client with DI URL
+Run the FDO client, specifying the DI URL with the TPM resource manager path specified.
+The suppoerted key type and key exchange must always be explicit through the -di-key and -kex flag.:
+```
+./fdo_client -di http://127.0.0.1:8080 -di-key ec256 -kex ECDH256 -tpm /dev/tpmrm0 -debug
+```
+>NOTE: fdo_client may require elevated privileges. Please use 'sudo' to execute.
+### Print FDO Client Configuration or Status
+Print the FDO client configuration or status:
+```
+./fdo_client -tpm /dev/tpmrm0  -print
+```
+
+## Execute TO0 from FDO Go Server
+TO0 will be completed in the respective Owner and RV.
+
+## Optional: Run the FDO Client in RV-Only Mode
+Run the FDO client in RV-only mode:
+```
+./fdo_client -rv-only -di-key ec256 -kex ECDH256 -tpm /dev/tpmrm0  -debug
+```
+### Run the FDO Client for End-to-End (E2E) Testing
+Run the FDO client for E2E testing:
+```
+./fdo_client -di-key ec256 -kex ECDH256 -tpm /dev/tpmrm0  -debug
+```
+

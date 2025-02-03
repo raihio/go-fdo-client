@@ -11,7 +11,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 )
 
@@ -95,11 +94,6 @@ func validateFlags() error {
 	validKexSuites := []string{"DHKEXid14", "DHKEXid15", "ASYMKEX2048", "ASYMKEX3072", "ECDH256", "ECDH384"}
 	if !contains(validKexSuites, kexSuite) {
 		return fmt.Errorf("invalid key exchange suite: %s", kexSuite)
-	}
-
-	TPMDEVICES := []string{"/dev/tpm0", "/dev/tpmrm0", "simulator"}
-	if tpmPath != "" && !slices.Contains(TPMDEVICES, tpmPath) {
-		return fmt.Errorf("invalid TPM path: %s", tpmPath)
 	}
 
 	for path := range uploads {

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: (C) 2024 Intel Corporation
 // SPDX-License-Identifier: Apache 2.0
 
-package main
+package cmd
 
 import (
 	"bytes"
@@ -10,7 +10,6 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/sha512"
-	"flag"
 	"fmt"
 	"hash"
 	"log/slog"
@@ -50,18 +49,6 @@ type fdoTpmDeviceCredential struct {
 }
 
 func tpmCred() (hash.Hash, hash.Hash, crypto.Signer, func() error, error) {
-	var diKeyFlagSet bool
-	clientFlags.Visit(func(flag *flag.Flag) {
-		if flag == nil {
-			slog.Error("Unexpected nil flag encountered")
-			return
-		}
-		diKeyFlagSet = diKeyFlagSet || flag.Name == "di-key"
-	})
-	if !diKeyFlagSet {
-		return nil, nil, nil, nil, fmt.Errorf("-di-key must be set explicitly when using a TPM")
-	}
-
 	// Use TPM keys for HMAC and Device Key
 	h256, err := tpm.NewHmac(tpmc, crypto.SHA256)
 	if err != nil {
@@ -84,7 +71,7 @@ func tpmCred() (hash.Hash, hash.Hash, crypto.Signer, func() error, error) {
 	case "rsa3072":
 		key, err = tpm.GenerateRSAKey(tpmc, 3072)
 	default:
-		err = fmt.Errorf("unsupported key type")
+		err = fmt.Errorf("unsupported key type: %s", diKey)
 	}
 	if err != nil {
 		_ = tpmc.Close()
@@ -127,39 +114,39 @@ func readCred() (_ *fdo.DeviceCredential, hmacSha256, hmacSha384 hash.Hash, key 
 		nil,
 		nil
 }
-func loadDeviceStatus(state *FdoDeviceState) bool {
-	if state == nil {
-		return false
-	}
+
+func loadDeviceStatus() (FdoDeviceState, error) {
 	var dataSize int
 	if tpmPath != "" {
 		nv := tpm2.TPMHandle(FDO_CRED_NV_IDX)
 		dataSize = (int)(tpmnv.TpmNVGetSize(tpmc, nv))
+		if dataSize != 0 {
+			var dc fdoTpmDeviceCredential
+			if err := readTpmCred(&dc); err != nil {
+				return FDO_STATE_PC, err
+			}
+			return dc.State, nil
+		}
 	} else {
 		blobData, err := os.ReadFile(filepath.Clean(blobPath))
 		if err != nil {
 			if os.IsNotExist(err) {
 				slog.Debug("DeviceCredential file does not exist. Set state to run DI")
-				*state = FDO_STATE_PRE_DI
-				return true // Return true if the file does not exist
+				return FDO_STATE_PRE_DI, nil
 			}
-			slog.Error("error reading blob credential %q: %v", blobPath, err)
-			return false
+			return FDO_STATE_PC, fmt.Errorf("error reading blob credential %q: %v", blobPath, err)
 		}
-		dataSize = len(blobData)
+		if len(blobData) > 0 {
+			var dc fdoDeviceCredential
+			if err := readCredFile(&dc); err != nil {
+				return FDO_STATE_PC, err
+			}
+			return dc.State, nil
+		}
 	}
 
-	if dataSize == 0 {
-		slog.Debug("DeviceCredential is empty. Set state to run DI")
-		*state = FDO_STATE_PRE_DI
-	} else if resale {
-		*state = FDO_STATE_RESALE
-		slog.Debug("DeviceCredential is non-empty. Set state to resale")
-	} else {
-		slog.Debug("DeviceCredential is non-empty. Set state to run TO1/TO2")
-		// No Device state is being set currently
-	}
-	return true
+	slog.Debug("DeviceCredential is empty. Set state to run DI")
+	return FDO_STATE_PRE_DI, nil
 }
 
 func readCredFile(v any) error {
@@ -169,9 +156,6 @@ func readCredFile(v any) error {
 	}
 	if err := cbor.Unmarshal(blobData, v); err != nil {
 		return fmt.Errorf("error parsing blob credential %q: %w", blobPath, err)
-	}
-	if printDevice {
-		fmt.Printf("%+v\n", v)
 	}
 	return nil
 }
@@ -235,9 +219,6 @@ func readTpmCred(v any) error {
 		return fmt.Errorf("error parsing credential: %w", err)
 	}
 
-	if printDevice {
-		fmt.Printf("%+v\n", v)
-	}
 	return nil
 }
 

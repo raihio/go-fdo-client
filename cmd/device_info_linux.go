@@ -13,6 +13,10 @@ import (
 	"strings"
 )
 
+const osInfoPath = "/etc/os-release"
+
+const productNamePath = "/sys/devices/virtual/dmi/id/product_name"
+
 func getSerial() (string, error) {
 	for _, serialPath := range []string{
 		"/sys/devices/virtual/dmi/id/product_serial",
@@ -41,27 +45,49 @@ func getMac(iface string) (string, error) {
 }
 
 func getOSVersion() (string, error) {
-	osInfoPath := "/etc/os-release"
 
-	osFile, err := os.ReadFile(osInfoPath)
+	osFile, err := os.Open(osInfoPath)
+	defer osFile.Close()
+
 	if err != nil {
-		return "", fmt.Errorf("cannot read file %w", err)
+		return "", fmt.Errorf("cannot read file: %w", err)
 	}
 
-	osInfo := make(map[string]string)
-	scanner := bufio.NewScanner(strings.NewReader(string(osFile)))
+	scanner := bufio.NewScanner(osFile)
+
+	var prettyName = ""
 
 	for scanner.Scan() {
 		line := scanner.Text()
 
 		if key, value, found := strings.Cut(line, "="); found {
-			osInfo[key] = strings.Trim(value, `"`)
+			if key == "PRETTY_NAME" {
+				// Remove outer quotes if any
+				if len(value) >= 2 && strings.HasPrefix(value, `"`) && strings.HasSuffix(value, `"`) {
+					prettyName = value[1 : len(value)-1]
+				} else {
+					prettyName = value
+				}
+				break
+			}
 		}
 	}
 
-	if prettyName := osInfo["PRETTY_NAME"]; prettyName != "" {
+	if scanner.Err() != nil {
+		return "", fmt.Errorf("error reading file: %w", scanner.Err())
+	}
+
+	if prettyName != "" {
 		return prettyName, nil
 	}
 
 	return "", fmt.Errorf("could not determine OS version from file %s", osInfoPath)
+}
+
+func getDeviceName() (string, error) {
+	name, err := os.ReadFile(productNamePath)
+	if err != nil {
+		return "", fmt.Errorf("cannot read file: %w", err)
+	}
+	return strings.TrimSpace(string(name)), nil
 }

@@ -21,3 +21,7 @@ func getMac(iface string) (string, error) {
 func getOSVersion() (string, error) {
 	return "", fmt.Errorf("getting OS version information is not supported on %s", runtime.GOOS)
 }
+
+func getDeviceName() (string, error) {
+	return "", fmt.Errorf("getting device name is not supported on %s", runtime.GOOS)
+}

@@ -129,6 +129,12 @@ func doOnboard() error {
 		slog.Warn("Setting serviceinfo.Devmod.Version", "error", err, "default", osVersion)
 	}
 
+	deviceName, err := getDeviceName()
+	if err != nil {
+		deviceName = "unknown"
+		slog.Warn("Setting serviceinfo.Devmod.Device", "error", err, "default", deviceName)
+	}
+
 	newDC, err := transferOwnership(clientContext, dc.RvInfo, fdo.TO2Config{
 		Cred:       *dc,
 		HmacSha256: hmacSha256,
@@ -138,7 +144,7 @@ func doOnboard() error {
 			Os:      runtime.GOOS,
 			Arch:    runtime.GOARCH,
 			Version: osVersion,
-			Device:  "go-validation",
+			Device:  deviceName,
 			FileSep: ";",
 			Bin:     runtime.GOARCH,
 		},

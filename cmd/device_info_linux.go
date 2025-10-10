@@ -13,9 +13,10 @@ import (
 	"strings"
 )
 
-const osInfoPath = "/etc/os-release"
-
-const productNamePath = "/sys/devices/virtual/dmi/id/product_name"
+const (
+	osInfoPath = "/etc/os-release"
+	productNamePath = "/sys/devices/virtual/dmi/id/product_name"
+)
 
 func getSerial() (string, error) {
 	for _, serialPath := range []string{
@@ -45,13 +46,11 @@ func getMac(iface string) (string, error) {
 }
 
 func getOSVersion() (string, error) {
-
 	osFile, err := os.Open(osInfoPath)
-	defer osFile.Close()
-
 	if err != nil {
 		return "", fmt.Errorf("cannot read file: %w", err)
 	}
+	defer osFile.Close()
 
 	scanner := bufio.NewScanner(osFile)
 

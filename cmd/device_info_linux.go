@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	osInfoPath = "/etc/os-release"
+	osInfoPath 		= "/etc/os-release"
 	productNamePath = "/sys/devices/virtual/dmi/id/product_name"
 )
 
@@ -53,8 +53,7 @@ func getOSVersion() (string, error) {
 	defer osFile.Close()
 
 	scanner := bufio.NewScanner(osFile)
-
-	var prettyName = ""
+	prettyName := ""
 
 	for scanner.Scan() {
 		line := scanner.Text()

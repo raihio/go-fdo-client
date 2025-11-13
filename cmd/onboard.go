@@ -4,6 +4,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -32,6 +33,14 @@ import (
 )
 
 type fsVar map[string]string
+
+type slogErrorWriter struct{}
+
+func (e slogErrorWriter) Write(p []byte) (int, error) {
+	w := bytes.TrimSpace(p)
+	slog.Error(string(w))
+	return len(w), nil
+}
 
 var (
 	allowCredentialReuse bool
@@ -362,6 +371,7 @@ func transferOwnership2(ctx context.Context, transport fdo.Transport, to1d *cose
 				}
 				return filepath.Join(dlDir, filepath.Base(cleanName))
 			},
+			ErrorLog: &slogErrorWriter{},
 		}
 	}
 	if echoCmds {

@@ -58,6 +58,19 @@ var validKexSuites = []string{
 var onboardCmd = &cobra.Command{
 	Use:   "onboard",
 	Short: "Run FDO TO1 and TO2 onboarding",
+	Long: `
+Run FDO TO1 and TO2 onboarding to transfer device ownership to the owner server.
+The device must have been initialized (device-init) before running onboard.
+At least one of --blob or --tpm is required to access device credentials.`,
+	Example: `
+  # Using CLI arguments:
+  go-fdo-client onboard --key ec256 --kex ECDH256 --blob cred.bin
+	
+  # Using config file:
+  go-fdo-client onboard --config config.yaml
+	
+  # Mix CLI and config (CLI takes precedence):
+  go-fdo-client onboard --config config.yaml --cipher A256GCM`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if err := validateOnboardFlags(); err != nil {
 			return fmt.Errorf("validation error: %v", err)

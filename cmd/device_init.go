@@ -49,12 +49,23 @@ var validDiKeys = []string{"ec256", "ec384", "rsa2048", "rsa3072"}
 var validDiKeyEncs = []string{"x509", "x5chain", "cose"}
 
 var deviceInitCmd = &cobra.Command{
-	Use:   "device-init <server-url>",
+	Use:   "device-init [server-url]",
 	Short: "Run device initialization (DI)",
-	Args:  cobra.ExactArgs(1),
+	Long: `
+Run device initialization (DI) to register the device with a manufacturer server.
+The server URL can be provided as a positional argument or via config file.
+At least one of --blob or --tpm is required to store device credentials.`,
+	Example: `
+  # Using CLI arguments:
+  go-fdo-client device-init http://127.0.0.1:8038 --key ec256 --blob cred.bin
+	
+  # Using config file:
+  go-fdo-client device-init --config config.yaml
+	
+  # Mix CLI and config (CLI takes precedence):
+  go-fdo-client device-init http://localhost:8038 --config config.yaml --key ec384`,
+	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		// Set the server URL from the positional argument
-		diURL = args[0]
 
 		if err := validateDIFlags(); err != nil {
 			return fmt.Errorf("Validation error: %v", err)
